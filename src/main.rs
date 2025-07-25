@@ -21,6 +21,7 @@ struct HttpRequest {
     body: String,
     body_type: BodyType,
     form_data: Vec<FormDataEntry>,
+    url_encoded_data: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,6 +30,7 @@ enum BodyType {
     Raw,
     Json,
     FormData,
+    UrlEncoded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -139,6 +141,7 @@ impl Default for SendApp {
                 body: String::new(),
                 body_type: BodyType::None,
                 form_data: vec![],
+                url_encoded_data: vec![],
             },
             current_response: None,
             is_loading: false,
@@ -602,6 +605,13 @@ impl SendApp {
             ).changed() {
                 self.save_current_request();
             }
+            if ui.selectable_value(
+                &mut self.current_request.body_type,
+                BodyType::UrlEncoded,
+                "x-www-form-urlencoded",
+            ).changed() {
+                self.save_current_request();
+            }
         });
         ui.separator();
         // Headers
@@ -656,6 +666,10 @@ impl SendApp {
             BodyType::FormData => {
                 ui.label("Form Data:");
                 self.draw_form_data_panel(ui);
+            }
+            BodyType::UrlEncoded => {
+                ui.label("URL-Encoded Form Data:");
+                self.draw_url_encoded_panel(ui);
             }
             BodyType::Json => {
                 ui.label(RichText::new("Body (JSON)").color(Color32::BLUE));
@@ -791,6 +805,54 @@ impl SendApp {
             });
             
             if form_data_changed {
+                self.save_current_request();
+            }
+        });
+    }
+
+    fn draw_url_encoded_panel(&mut self, ui: &mut Ui) {
+        ScrollArea::vertical().show(ui, |ui| {
+            let mut to_remove = Vec::new();
+            let mut url_encoded_changed = false;
+            
+            for (i, (key, value)) in self.current_request.url_encoded_data.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    let key_response = ui.add(
+                        TextEdit::singleline(key)
+                            .hint_text("Key")
+                            .desired_width(200.0)
+                    );
+                    let value_response = ui.add(
+                        TextEdit::singleline(value)
+                            .hint_text("Value")
+                            .desired_width(250.0)
+                    );
+                    
+                    if key_response.changed() || value_response.changed() {
+                        url_encoded_changed = true;
+                    }
+                    
+                    if ui.button("🗑").clicked() {
+                        to_remove.push(i);
+                    }
+                });
+            }
+            
+            // Remove entries
+            if !to_remove.is_empty() {
+                for &i in to_remove.iter().rev() {
+                    self.current_request.url_encoded_data.remove(i);
+                }
+                url_encoded_changed = true;
+            }
+            
+            // Add new entry button
+            if ui.button("Add Parameter").clicked() {
+                self.current_request.url_encoded_data.push((String::new(), String::new()));
+                url_encoded_changed = true;
+            }
+            
+            if url_encoded_changed {
                 self.save_current_request();
             }
         });
@@ -1030,15 +1092,33 @@ impl SendApp {
                     
                     req_builder = req_builder.multipart(form);
                 }
-                _ => {
-                    // Set headers for non-form-data requests
+                BodyType::UrlEncoded if !request.url_encoded_data.is_empty() => {
+                    // Set headers for URL-encoded requests
                     for (key, value) in &resolved_headers {
                         if !key.trim().is_empty() && !value.trim().is_empty() {
                             req_builder = req_builder.header(key, value);
                         }
                     }
                     
-                    // Set body for non-form-data requests
+                    // Create URL-encoded form data
+                    let mut form_params = Vec::new();
+                    for (key, value) in &request.url_encoded_data {
+                        if !key.trim().is_empty() {
+                            form_params.push((key.as_str(), value.as_str()));
+                        }
+                    }
+                    
+                    req_builder = req_builder.form(&form_params);
+                }
+                _ => {
+                    // Set headers for other request types
+                    for (key, value) in &resolved_headers {
+                        if !key.trim().is_empty() && !value.trim().is_empty() {
+                            req_builder = req_builder.header(key, value);
+                        }
+                    }
+                    
+                    // Set body for non-form requests
                     if !resolved_body.trim().is_empty() {
                         req_builder = req_builder.body(resolved_body);
                     }
