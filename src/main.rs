@@ -61,7 +61,7 @@ struct Collection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Environment {
     name: String,
-    variables: HashMap<String, String>,
+    variables: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +104,8 @@ struct SendApp {
     new_request_name: String,
     new_workspace_dialog: bool,
     new_workspace_name: String,
+    new_environment_dialog: bool,
+    new_environment_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,7 +127,7 @@ impl Default for SendApp {
             }],
             environments: vec![Environment {
                 name: "Default".to_string(),
-                variables: HashMap::new(),
+                variables: vec![],
             }],
             selected_collection: Some(0),
             selected_request: None,
@@ -160,6 +162,8 @@ impl Default for SendApp {
             new_request_name: String::new(),
             new_workspace_dialog: false,
             new_workspace_name: String::new(),
+            new_environment_dialog: false,
+            new_environment_name: String::new(),
         }
     }
 }
@@ -207,6 +211,10 @@ impl eframe::App for SendApp {
                     }
                     if ui.button("New Request").clicked() {
                         self.new_request_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("New Environment").clicked() {
+                        self.new_environment_dialog = true;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -489,23 +497,40 @@ impl SendApp {
         let current_workspace_idx = self.current_workspace;
         let mut env_changed = false;
         
-        // Environment selector
+        // Environment selector and management
         let workspace = &mut self.workspaces[current_workspace_idx];
-        if let Some(env_idx) = workspace.selected_environment {
-            if env_idx < workspace.environments.len() {
-                egui::ComboBox::from_label("Environment")
-                    .selected_text(&workspace.environments[env_idx].name)
-                    .show_ui(ui, |ui| {
-                        for (idx, env) in workspace.environments.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut workspace.selected_environment,
-                                Some(idx),
-                                &env.name,
-                            );
-                        }
-                    });
+        ui.horizontal(|ui| {
+            let selected_text = if let Some(env_idx) = workspace.selected_environment {
+                if env_idx < workspace.environments.len() {
+                    workspace.environments[env_idx].name.clone()
+                } else {
+                    "No Environment".to_string()
+                }
+            } else {
+                "No Environment".to_string()
+            };
+            
+            egui::ComboBox::from_label("Active Environment")
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut workspace.selected_environment,
+                        None,
+                        "No Environment",
+                    );
+                    for (idx, env) in workspace.environments.iter().enumerate() {
+                        ui.selectable_value(
+                            &mut workspace.selected_environment,
+                            Some(idx),
+                            &env.name,
+                        );
+                    }
+                });
+            
+            if ui.button("New Environment").clicked() {
+                self.new_environment_dialog = true;
             }
-        }
+        });
         ui.separator();
         // Variables
         if let Some(env_idx) = workspace.selected_environment {
@@ -515,29 +540,77 @@ impl SendApp {
                     let workspace = &mut self.workspaces[current_workspace_idx];
                     let env = &mut workspace.environments[env_idx];
                     let mut to_remove = Vec::new();
+                    
+                    // Table header
+                    ui.horizontal(|ui| {
+                        ui.label("Key");
+                        ui.add_space(150.0);
+                        ui.label("Value");
+                    });
+                    ui.separator();
+                    
+                    // Pre-calculate duplicate information to avoid borrow checker issues
+                    let mut duplicate_keys = Vec::new();
+                    for (i, (key, _)) in env.variables.iter().enumerate() {
+                        let is_duplicate = !key.trim().is_empty() && 
+                            env.variables.iter().enumerate()
+                                .filter(|(idx, (k, _))| *idx != i && k.trim() == key.trim())
+                                .count() > 0;
+                        duplicate_keys.push(is_duplicate);
+                    }
+                    
                     for (i, (key, value)) in env.variables.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(format!("{}:", key));
-                            if ui.text_edit_singleline(value).changed() {
+                            let is_duplicate = duplicate_keys.get(i).copied().unwrap_or(false);
+                            
+                            let key_color = if is_duplicate && !key.trim().is_empty() {
+                                Color32::from_rgb(255, 100, 100) // Red for duplicates
+                            } else if key.trim().is_empty() {
+                                Color32::from_rgb(150, 150, 150) // Gray for empty
+                            } else {
+                                Color32::WHITE // Normal
+                            };
+                            
+                            let mut key_edit = TextEdit::singleline(key)
+                                .hint_text("Variable name")
+                                .desired_width(150.0);
+                            
+                            if is_duplicate {
+                                key_edit = key_edit.text_color(key_color);
+                            }
+                            
+                            let key_response = ui.add(key_edit);
+                            let value_response = ui.add(
+                                TextEdit::singleline(value)
+                                    .hint_text("Variable value")
+                                    .desired_width(200.0)
+                            );
+                            
+                            if is_duplicate && !key.trim().is_empty() {
+                                ui.colored_label(Color32::from_rgb(255, 100, 100), "⚠");
+                            }
+                            
+                            if key_response.changed() || value_response.changed() {
                                 env_changed = true;
                             }
+                            
                             if ui.button("🗑").clicked() {
                                 to_remove.push(i);
                             }
                         });
                     }
+                    
+                    // Remove variables
                     if !to_remove.is_empty() {
                         for &i in to_remove.iter().rev() {
-                            let keys: Vec<String> = env.variables.keys().cloned().collect();
-                            if i < keys.len() {
-                                env.variables.remove(&keys[i]);
-                            }
+                            env.variables.remove(i);
                         }
                         env_changed = true;
                     }
+                    
+                    // Add new variable button
                     if ui.button("Add Variable").clicked() {
-                        env.variables
-                            .insert(format!("key{}", env.variables.len()), "value".to_string());
+                        env.variables.push(("".to_string(), "".to_string()));
                         env_changed = true;
                     }
                 });
@@ -603,6 +676,24 @@ impl SendApp {
                 && !self.is_loading
             {
                 self.send_request();
+            }
+        });
+        
+        // Environment indicator
+        ui.horizontal(|ui| {
+            ui.label("Environment:");
+            let workspace = self.current_workspace();
+            if let Some(env_idx) = workspace.selected_environment {
+                if env_idx < workspace.environments.len() {
+                    ui.colored_label(
+                        Color32::from_rgb(0, 128, 255),
+                        &workspace.environments[env_idx].name
+                    );
+                } else {
+                    ui.colored_label(Color32::GRAY, "No Environment");
+                }
+            } else {
+                ui.colored_label(Color32::GRAY, "No Environment");
             }
         });
         ui.separator();
@@ -1083,7 +1174,7 @@ impl SendApp {
                                     }],
                                     environments: vec![Environment {
                                         name: "Default".to_string(),
-                                        variables: HashMap::new(),
+                                        variables: vec![],
                                     }],
                                     selected_collection: Some(0),
                                     selected_request: None,
@@ -1098,6 +1189,38 @@ impl SendApp {
                         if ui.button("Cancel").clicked() {
                             self.new_workspace_name.clear();
                             self.new_workspace_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        // New Environment Dialog
+        if self.new_environment_dialog {
+            egui::Window::new("New Environment")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Environment Name:");
+                    ui.text_edit_singleline(&mut self.new_environment_name);
+                    ui.horizontal(|ui| {
+                        if ui.button("Create").clicked() {
+                            if !self.new_environment_name.trim().is_empty() {
+                                let new_environment = Environment {
+                                    name: self.new_environment_name.clone(),
+                                    variables: vec![],
+                                };
+                                self.current_workspace_mut().environments.push(new_environment);
+                                // Set the new environment as selected
+                                let new_env_index = self.current_workspace().environments.len() - 1;
+                                self.current_workspace_mut().selected_environment = Some(new_env_index);
+                                self.new_environment_name.clear();
+                                self.new_environment_dialog = false;
+                                self.auto_save_workspace();
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.new_environment_name.clear();
+                            self.new_environment_dialog = false;
                         }
                     });
                 });
