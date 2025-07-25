@@ -83,6 +83,8 @@ struct SendApp {
     new_collection_name: String,
     new_request_dialog: bool,
     new_request_name: String,
+    // Auto-save
+    workspace_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +129,7 @@ impl Default for SendApp {
             new_collection_name: String::new(),
             new_request_dialog: false,
             new_request_name: String::new(),
+            workspace_file: None,
         }
     }
 }
@@ -233,6 +236,27 @@ impl eframe::App for SendApp {
 }
 
 impl SendApp {
+    fn save_current_request(&mut self) {
+        if let (Some(collection_idx), Some(request_idx)) = (self.selected_collection, self.selected_request) {
+            if collection_idx < self.collections.len() && request_idx < self.collections[collection_idx].requests.len() {
+                self.collections[collection_idx].requests[request_idx] = self.current_request.clone();
+                self.auto_save_workspace();
+            }
+        }
+    }
+
+    fn auto_save_workspace(&self) {
+        if let Some(path) = &self.workspace_file {
+            let data = AppStorage {
+                collections: self.collections.clone(),
+                environments: self.environments.clone(),
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&data) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+
     fn resolve_value(&self, input: &str) -> String {
         let mut result = input.to_string();
         if let Some(env_idx) = self.selected_environment {
@@ -247,7 +271,7 @@ impl SendApp {
         result
     }
 
-    fn save_to_file(&self) {
+    fn save_to_file(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .set_title("Save Workspace")
             .add_filter("JSON", &["json"])
@@ -258,7 +282,9 @@ impl SendApp {
                 environments: self.environments.clone(),
             };
             let json = serde_json::to_string_pretty(&data).unwrap();
-            std::fs::write(path, json).ok();
+            if std::fs::write(&path, json).is_ok() {
+                self.workspace_file = Some(path);
+            }
         }
     }
 
@@ -268,13 +294,14 @@ impl SendApp {
             .add_filter("JSON", &["json"])
             .pick_file()
         {
-            if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(storage) = serde_json::from_str::<AppStorage>(&content) {
                     self.collections = storage.collections;
                     self.environments = storage.environments;
                     self.selected_collection = self.collections.get(0).map(|_| 0);
                     self.selected_request = None;
                     self.selected_environment = self.environments.get(0).map(|_| 0);
+                    self.workspace_file = Some(path);
                 }
             }
         }
@@ -372,24 +399,34 @@ impl SendApp {
                 ScrollArea::vertical().show(ui, |ui| {
                     let env = &mut self.environments[env_idx];
                     let mut to_remove = Vec::new();
+                    let mut env_changed = false;
                     for (i, (key, value)) in env.variables.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(format!("{}:", key));
-                            ui.text_edit_singleline(value);
+                            if ui.text_edit_singleline(value).changed() {
+                                env_changed = true;
+                            }
                             if ui.button("🗑").clicked() {
                                 to_remove.push(i);
                             }
                         });
                     }
-                    for &i in to_remove.iter().rev() {
-                        let keys: Vec<String> = env.variables.keys().cloned().collect();
-                        if i < keys.len() {
-                            env.variables.remove(&keys[i]);
+                    if !to_remove.is_empty() {
+                        for &i in to_remove.iter().rev() {
+                            let keys: Vec<String> = env.variables.keys().cloned().collect();
+                            if i < keys.len() {
+                                env.variables.remove(&keys[i]);
+                            }
                         }
+                        env_changed = true;
                     }
                     if ui.button("Add Variable").clicked() {
                         env.variables
                             .insert(format!("key{}", env.variables.len()), "value".to_string());
+                        env_changed = true;
+                    }
+                    if env_changed {
+                        self.auto_save_workspace();
                     }
                 });
             }
@@ -401,7 +438,7 @@ impl SendApp {
         ui.separator();
         // Method and URL
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_source("method")
+            let method_response = egui::ComboBox::from_id_source("method")
                 .selected_text(&self.current_request.method)
                 .width(80.0)
                 .show_ui(ui, |ui| {
@@ -433,11 +470,17 @@ impl SendApp {
                         "OPTIONS",
                     );
                 });
-            ui.add(
+            if method_response.response.changed() {
+                self.save_current_request();
+            }
+            let url_response = ui.add(
                 TextEdit::singleline(&mut self.current_request.url)
                     .hint_text("Enter URL (supports {{variable}})...")
                     .desired_width(ui.available_width() - 80.0),
             );
+            if url_response.changed() {
+                self.save_current_request();
+            }
             if ui
                 .button(if self.is_loading { "⏸" } else { "Send" })
                 .clicked()
@@ -449,26 +492,38 @@ impl SendApp {
         ui.separator();
         // Tabs for request details
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.current_request.body_type, BodyType::None, "None");
-            ui.selectable_value(&mut self.current_request.body_type, BodyType::Raw, "Raw");
-            ui.selectable_value(&mut self.current_request.body_type, BodyType::Json, "JSON");
-            ui.selectable_value(
+            if ui.selectable_value(&mut self.current_request.body_type, BodyType::None, "None").changed() {
+                self.save_current_request();
+            }
+            if ui.selectable_value(&mut self.current_request.body_type, BodyType::Raw, "Raw").changed() {
+                self.save_current_request();
+            }
+            if ui.selectable_value(&mut self.current_request.body_type, BodyType::Json, "JSON").changed() {
+                self.save_current_request();
+            }
+            if ui.selectable_value(
                 &mut self.current_request.body_type,
                 BodyType::FormData,
                 "Form Data",
-            );
+            ).changed() {
+                self.save_current_request();
+            }
         });
         ui.separator();
         // Headers
         ui.collapsing("Headers", |ui| {
             let mut to_remove = Vec::new();
+            let mut headers_changed = false;
             for (i, (key, value)) in self.current_request.headers.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.add(TextEdit::singleline(key).hint_text("Header name"));
-                    ui.add(
+                    let key_response = ui.add(TextEdit::singleline(key).hint_text("Header name"));
+                    let value_response = ui.add(
                         TextEdit::singleline(value)
                             .hint_text("Header value (supports {{variable}})"),
                     );
+                    if key_response.changed() || value_response.changed() {
+                        headers_changed = true;
+                    }
                     if ui.button("🗑").clicked() {
                         to_remove.push(i);
                     }
@@ -476,11 +531,16 @@ impl SendApp {
             }
             for &i in to_remove.iter().rev() {
                 self.current_request.headers.remove(i);
+                headers_changed = true;
             }
             if ui.button("Add Header").clicked() {
                 self.current_request
                     .headers
                     .push((String::new(), String::new()));
+                headers_changed = true;
+            }
+            if headers_changed {
+                self.save_current_request();
             }
         });
 
@@ -489,12 +549,15 @@ impl SendApp {
             BodyType::None => {}
             BodyType::Raw | BodyType::FormData => {
                 ui.label("Body:");
-                ui.add(
+                let body_response = ui.add(
                     TextEdit::multiline(&mut self.current_request.body)
                         .desired_rows(10)
                         .desired_width(ui.available_width())
                         .hint_text("Enter raw or form data..."),
                 );
+                if body_response.changed() {
+                    self.save_current_request();
+                }
             }
             BodyType::Json => {
                 ui.label(RichText::new("Body (JSON)").color(Color32::BLUE));
@@ -505,14 +568,19 @@ impl SendApp {
                 let lang = "json";
                 let job = highlight(ui.ctx(), ui.style(), &theme, &code, lang);
 
-                ui.add(
+                let json_response = ui.add(
                     TextEdit::multiline(&mut code)
                         .code_editor()
                         .desired_rows(10)
                         .desired_width(ui.available_width()),
                 );
 
-                self.current_request.body = code;
+                if code != self.current_request.body {
+                    self.current_request.body = code;
+                    if json_response.changed() {
+                        self.save_current_request();
+                    }
+                }
             }
         }
     }
@@ -600,6 +668,7 @@ impl SendApp {
                                 });
                                 self.new_collection_name.clear();
                                 self.new_collection_dialog = false;
+                                self.auto_save_workspace();
                             }
                         }
                         if ui.button("Cancel").clicked() {
@@ -629,6 +698,7 @@ impl SendApp {
                                         self.collections[collection_idx].requests.push(new_request);
                                         self.new_request_name.clear();
                                         self.new_request_dialog = false;
+                                        self.auto_save_workspace();
                                     }
                                 }
                             }
