@@ -52,10 +52,18 @@ struct HttpResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Collection {
+struct Folder {
     id: String,
     name: String,
     requests: Vec<HttpRequest>,
+    folders: Vec<Folder>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Collection {
+    id: String,
+    name: String,
+    root_folder: Folder,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +85,7 @@ struct Workspace {
     collections: Vec<Collection>,
     environments: Vec<Environment>,
     selected_collection: Option<usize>,
+    selected_folder_path: Vec<usize>, // Path to selected folder within collection
     selected_request: Option<usize>,
     selected_environment: Option<usize>,
 }
@@ -106,6 +115,8 @@ struct SendApp {
     new_workspace_name: String,
     new_environment_dialog: bool,
     new_environment_name: String,
+    new_folder_dialog: bool,
+    new_folder_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,13 +134,19 @@ impl Default for SendApp {
             collections: vec![Collection {
                 id: Uuid::new_v4().to_string(),
                 name: "Default Collection".to_string(),
-                requests: vec![],
+                root_folder: Folder {
+                    id: Uuid::new_v4().to_string(),
+                    name: "Root".to_string(),
+                    requests: vec![],
+                    folders: vec![],
+                },
             }],
             environments: vec![Environment {
                 name: "Default".to_string(),
                 variables: vec![],
             }],
             selected_collection: Some(0),
+            selected_folder_path: vec![],
             selected_request: None,
             selected_environment: Some(0),
         };
@@ -164,6 +181,8 @@ impl Default for SendApp {
             new_workspace_name: String::new(),
             new_environment_dialog: false,
             new_environment_name: String::new(),
+            new_folder_dialog: false,
+            new_folder_name: String::new(),
         }
     }
 }
@@ -207,6 +226,10 @@ impl eframe::App for SendApp {
                     ui.separator();
                     if ui.button("New Collection").clicked() {
                         self.new_collection_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("New Folder").clicked() {
+                        self.new_folder_dialog = true;
                         ui.close_menu();
                     }
                     if ui.button("New Request").clicked() {
@@ -315,13 +338,47 @@ impl SendApp {
         &mut self.workspaces[self.current_workspace]
     }
 
+    fn get_folder_by_path_mut<'a>(collection: &'a mut Collection, folder_path: &[usize]) -> Option<&'a mut Folder> {
+        let mut current_folder = &mut collection.root_folder;
+        
+        for &folder_idx in folder_path {
+            if folder_idx < current_folder.folders.len() {
+                current_folder = &mut current_folder.folders[folder_idx];
+            } else {
+                return None;
+            }
+        }
+        Some(current_folder)
+    }
+
+    fn get_folder_by_path<'a>(collection: &'a Collection, folder_path: &[usize]) -> Option<&'a Folder> {
+        let mut current_folder = &collection.root_folder;
+        
+        for &folder_idx in folder_path {
+            if folder_idx < current_folder.folders.len() {
+                current_folder = &current_folder.folders[folder_idx];
+            } else {
+                return None;
+            }
+        }
+        Some(current_folder)
+    }
+
     fn save_current_request(&mut self) {
         let current_request = self.current_request.clone();
-        let workspace = self.current_workspace_mut();
-        if let (Some(collection_idx), Some(request_idx)) = (workspace.selected_collection, workspace.selected_request) {
-            if collection_idx < workspace.collections.len() && request_idx < workspace.collections[collection_idx].requests.len() {
-                workspace.collections[collection_idx].requests[request_idx] = current_request;
-                self.auto_save_workspace();
+        let current_workspace_idx = self.current_workspace;
+        let collection_idx = self.workspaces[current_workspace_idx].selected_collection;
+        let request_idx = self.workspaces[current_workspace_idx].selected_request;
+        let folder_path = self.workspaces[current_workspace_idx].selected_folder_path.clone();
+        
+        if let (Some(collection_idx), Some(request_idx)) = (collection_idx, request_idx) {
+            if collection_idx < self.workspaces[current_workspace_idx].collections.len() {
+                if let Some(folder) = Self::get_folder_by_path_mut(&mut self.workspaces[current_workspace_idx].collections[collection_idx], &folder_path) {
+                    if request_idx < folder.requests.len() {
+                        folder.requests[request_idx] = current_request;
+                        self.auto_save_workspace();
+                    }
+                }
             }
         }
     }
@@ -394,6 +451,7 @@ impl SendApp {
                         collections: storage.collections,
                         environments: storage.environments,
                         selected_collection,
+                        selected_folder_path: vec![],
                         selected_request: None,
                         selected_environment,
                     };
@@ -442,36 +500,41 @@ impl SendApp {
         
         let current_workspace_idx = self.current_workspace;
         let mut selected_collection = None;
+        let mut selected_folder_path = None;
         let mut selected_request = None;
         let mut new_current_request = None;
         
         ScrollArea::vertical().show(ui, |ui| {
-            let workspace = &mut self.workspaces[current_workspace_idx];
-            for (collection_idx, collection) in workspace.collections.iter_mut().enumerate() {
-                let is_selected = workspace.selected_collection == Some(collection_idx);
+            let workspace = &self.workspaces[current_workspace_idx];
+            let selected_folder_path_copy = workspace.selected_folder_path.clone();
+            let selected_request_copy = workspace.selected_request;
+            let selected_collection_copy = workspace.selected_collection;
+            
+            for (collection_idx, collection) in workspace.collections.iter().enumerate() {
+                let is_selected = selected_collection_copy == Some(collection_idx);
                 let response = ui.selectable_label(is_selected, &collection.name);
                 if response.clicked() {
                     selected_collection = Some(collection_idx);
+                    selected_folder_path = Some(vec![]);
                     selected_request = None;
                 }
                 if is_selected {
-                    ui.indent("requests", |ui| {
-                        for (request_idx, request) in collection.requests.iter().enumerate() {
-                            let selected_req = workspace.selected_request == Some(request_idx);
-                            let method_color = match request.method.as_str() {
-                                "GET" => Color32::from_rgb(0, 128, 0),
-                                "POST" => Color32::from_rgb(255, 165, 0),
-                                "PUT" => Color32::from_rgb(0, 0, 255),
-                                "DELETE" => Color32::from_rgb(255, 0, 0),
-                                _ => Color32::GRAY,
-                            };
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(&request.method).color(method_color));
-                                if ui.selectable_label(selected_req, &request.name).clicked() {
-                                    selected_request = Some(request_idx);
-                                    new_current_request = Some(request.clone());
-                                }
-                            });
+                    ui.indent("collection_content", |ui| {
+                        let (sel_folder_path, sel_request, new_request) = self.draw_folder_contents(
+                            ui, 
+                            &collection.root_folder, 
+                            vec![], 
+                            &selected_folder_path_copy, 
+                            selected_request_copy
+                        );
+                        if let Some(path) = sel_folder_path {
+                            selected_folder_path = Some(path);
+                        }
+                        if let Some(req_idx) = sel_request {
+                            selected_request = Some(req_idx);
+                        }
+                        if let Some(request) = new_request {
+                            new_current_request = Some(request);
                         }
                     });
                 }
@@ -480,7 +543,12 @@ impl SendApp {
         
         if let Some(collection_idx) = selected_collection {
             self.workspaces[current_workspace_idx].selected_collection = Some(collection_idx);
-            self.workspaces[current_workspace_idx].selected_request = selected_request;
+            if let Some(folder_path) = selected_folder_path {
+                self.workspaces[current_workspace_idx].selected_folder_path = folder_path;
+            }
+            if selected_request.is_none() {
+                self.workspaces[current_workspace_idx].selected_request = None;
+            }
         }
         if let Some(request_idx) = selected_request {
             self.workspaces[current_workspace_idx].selected_request = Some(request_idx);
@@ -488,6 +556,77 @@ impl SendApp {
         if let Some(request) = new_current_request {
             self.current_request = request;
         }
+    }
+
+    fn draw_folder_contents(
+        &self,
+        ui: &mut Ui,
+        folder: &Folder,
+        current_path: Vec<usize>,
+        selected_folder_path: &[usize],
+        selected_request: Option<usize>,
+    ) -> (Option<Vec<usize>>, Option<usize>, Option<HttpRequest>) {
+        let mut result_folder_path = None;
+        let mut result_request = None;
+        let mut result_request_data = None;
+
+        // Draw subfolders first
+        for (folder_idx, subfolder) in folder.folders.iter().enumerate() {
+            let mut subfolder_path = current_path.clone();
+            subfolder_path.push(folder_idx);
+            
+            let is_selected_folder = selected_folder_path == subfolder_path;
+            
+            ui.horizontal(|ui| {
+                ui.label("📁");
+                if ui.selectable_label(is_selected_folder, &subfolder.name).clicked() {
+                    result_folder_path = Some(subfolder_path.clone());
+                }
+            });
+            
+            if is_selected_folder {
+                ui.indent(format!("folder_{}", folder_idx), |ui| {
+                    let (sub_folder_path, sub_request, sub_request_data) = self.draw_folder_contents(
+                        ui, 
+                        subfolder, 
+                        subfolder_path, 
+                        selected_folder_path, 
+                        selected_request
+                    );
+                    if sub_folder_path.is_some() {
+                        result_folder_path = sub_folder_path;
+                    }
+                    if sub_request.is_some() {
+                        result_request = sub_request;
+                        result_request_data = sub_request_data;
+                    }
+                });
+            }
+        }
+
+        // Draw requests in current folder
+        let is_current_folder_selected = selected_folder_path == current_path;
+        if is_current_folder_selected {
+            for (request_idx, request) in folder.requests.iter().enumerate() {
+                let selected_req = selected_request == Some(request_idx);
+                let method_color = match request.method.as_str() {
+                    "GET" => Color32::from_rgb(0, 128, 0),
+                    "POST" => Color32::from_rgb(255, 165, 0),
+                    "PUT" => Color32::from_rgb(0, 0, 255),
+                    "DELETE" => Color32::from_rgb(255, 0, 0),
+                    _ => Color32::GRAY,
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&request.method).color(method_color));
+                    if ui.selectable_label(selected_req, &request.name).clicked() {
+                        result_request = Some(request_idx);
+                        result_request_data = Some(request.clone());
+                    }
+                });
+            }
+        }
+
+        (result_folder_path, result_request, result_request_data)
     }
 
     fn draw_environment_panel(&mut self, ui: &mut Ui) {
@@ -1103,7 +1242,12 @@ impl SendApp {
                                 self.current_workspace_mut().collections.push(Collection {
                                     id: Uuid::new_v4().to_string(),
                                     name: collection_name,
-                                    requests: vec![],
+                                    root_folder: Folder {
+                                        id: Uuid::new_v4().to_string(),
+                                        name: "Root".to_string(),
+                                        requests: vec![],
+                                        folders: vec![],
+                                    },
                                 });
                                 self.new_collection_name.clear();
                                 self.new_collection_dialog = false;
@@ -1131,16 +1275,21 @@ impl SendApp {
                             if !self.new_request_name.trim().is_empty() {
                                 let request_name = self.new_request_name.clone();
                                 let current_request = self.current_request.clone();
-                                let workspace = self.current_workspace_mut();
-                                if let Some(collection_idx) = workspace.selected_collection {
-                                    if collection_idx < workspace.collections.len() {
-                                        let mut new_request = current_request;
-                                        new_request.id = Uuid::new_v4().to_string();
-                                        new_request.name = request_name;
-                                        workspace.collections[collection_idx].requests.push(new_request);
-                                        self.new_request_name.clear();
-                                        self.new_request_dialog = false;
-                                        self.auto_save_workspace();
+                                let current_workspace_idx = self.current_workspace;
+                                let collection_idx = self.workspaces[current_workspace_idx].selected_collection;
+                                let folder_path = self.workspaces[current_workspace_idx].selected_folder_path.clone();
+                                
+                                if let Some(collection_idx) = collection_idx {
+                                    if collection_idx < self.workspaces[current_workspace_idx].collections.len() {
+                                        if let Some(folder) = Self::get_folder_by_path_mut(&mut self.workspaces[current_workspace_idx].collections[collection_idx], &folder_path) {
+                                            let mut new_request = current_request;
+                                            new_request.id = Uuid::new_v4().to_string();
+                                            new_request.name = request_name;
+                                            folder.requests.push(new_request);
+                                            self.new_request_name.clear();
+                                            self.new_request_dialog = false;
+                                            self.auto_save_workspace();
+                                        }
                                     }
                                 }
                             }
@@ -1170,13 +1319,19 @@ impl SendApp {
                                     collections: vec![Collection {
                                         id: Uuid::new_v4().to_string(),
                                         name: "Default Collection".to_string(),
-                                        requests: vec![],
+                                        root_folder: Folder {
+                                            id: Uuid::new_v4().to_string(),
+                                            name: "Root".to_string(),
+                                            requests: vec![],
+                                            folders: vec![],
+                                        },
                                     }],
                                     environments: vec![Environment {
                                         name: "Default".to_string(),
                                         variables: vec![],
                                     }],
                                     selected_collection: Some(0),
+                                    selected_folder_path: vec![],
                                     selected_request: None,
                                     selected_environment: Some(0),
                                 };
@@ -1221,6 +1376,47 @@ impl SendApp {
                         if ui.button("Cancel").clicked() {
                             self.new_environment_name.clear();
                             self.new_environment_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        // New Folder Dialog
+        if self.new_folder_dialog {
+            egui::Window::new("New Folder")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Folder Name:");
+                    ui.text_edit_singleline(&mut self.new_folder_name);
+                    ui.horizontal(|ui| {
+                        if ui.button("Create").clicked() {
+                            if !self.new_folder_name.trim().is_empty() {
+                                let folder_name = self.new_folder_name.clone();
+                                let current_workspace_idx = self.current_workspace;
+                                let collection_idx = self.workspaces[current_workspace_idx].selected_collection;
+                                let folder_path = self.workspaces[current_workspace_idx].selected_folder_path.clone();
+                                
+                                if let Some(collection_idx) = collection_idx {
+                                    if collection_idx < self.workspaces[current_workspace_idx].collections.len() {
+                                        if let Some(folder) = Self::get_folder_by_path_mut(&mut self.workspaces[current_workspace_idx].collections[collection_idx], &folder_path) {
+                                            folder.folders.push(Folder {
+                                                id: Uuid::new_v4().to_string(),
+                                                name: folder_name,
+                                                requests: vec![],
+                                                folders: vec![],
+                                            });
+                                            self.new_folder_name.clear();
+                                            self.new_folder_dialog = false;
+                                            self.auto_save_workspace();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.new_folder_name.clear();
+                            self.new_folder_dialog = false;
                         }
                     });
                 });
