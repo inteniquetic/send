@@ -22,6 +22,7 @@ struct HttpRequest {
     body_type: BodyType,
     form_data: Vec<FormDataEntry>,
     url_encoded_data: Vec<(String, String)>,
+    query_params: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -142,6 +143,7 @@ impl Default for SendApp {
                 body_type: BodyType::None,
                 form_data: vec![],
                 url_encoded_data: vec![],
+                query_params: vec![],
             },
             current_response: None,
             is_loading: false,
@@ -587,6 +589,12 @@ impl SendApp {
             }
         });
         ui.separator();
+        
+        // Query Parameters
+        ui.collapsing("Query Params", |ui| {
+            self.draw_query_params_panel(ui);
+        });
+        
         // Tabs for request details
         ui.horizontal(|ui| {
             if ui.selectable_value(&mut self.current_request.body_type, BodyType::None, "None").changed() {
@@ -858,6 +866,52 @@ impl SendApp {
         });
     }
 
+    fn draw_query_params_panel(&mut self, ui: &mut Ui) {
+        let mut to_remove = Vec::new();
+        let mut query_params_changed = false;
+        
+        for (i, (key, value)) in self.current_request.query_params.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                let key_response = ui.add(
+                    TextEdit::singleline(key)
+                        .hint_text("Parameter name")
+                        .desired_width(200.0)
+                );
+                let value_response = ui.add(
+                    TextEdit::singleline(value)
+                        .hint_text("Parameter value")
+                        .desired_width(250.0)
+                );
+                
+                if key_response.changed() || value_response.changed() {
+                    query_params_changed = true;
+                }
+                
+                if ui.button("🗑").clicked() {
+                    to_remove.push(i);
+                }
+            });
+        }
+        
+        // Remove entries
+        if !to_remove.is_empty() {
+            for &i in to_remove.iter().rev() {
+                self.current_request.query_params.remove(i);
+            }
+            query_params_changed = true;
+        }
+        
+        // Add new entry button
+        if ui.button("Add Query Parameter").clicked() {
+            self.current_request.query_params.push((String::new(), String::new()));
+            query_params_changed = true;
+        }
+        
+        if query_params_changed {
+            self.save_current_request();
+        }
+    }
+
     fn draw_response_panel(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.heading("Response");
@@ -1037,7 +1091,27 @@ impl SendApp {
         let (tx, rx) = mpsc::channel();
         self.response_receiver = Some(rx);
 
-        let resolved_url = self.resolve_value(&request.url);
+        let mut resolved_url = self.resolve_value(&request.url);
+        
+        // Add query parameters to URL
+        if !request.query_params.is_empty() {
+            let mut params = Vec::new();
+            for (key, value) in &request.query_params {
+                if !key.trim().is_empty() {
+                    let resolved_key = self.resolve_value(key);
+                    let resolved_value = self.resolve_value(value);
+                    params.push(format!("{}={}", 
+                        urlencoding::encode(&resolved_key), 
+                        urlencoding::encode(&resolved_value)
+                    ));
+                }
+            }
+            if !params.is_empty() {
+                let separator = if resolved_url.contains('?') { "&" } else { "?" };
+                resolved_url = format!("{}{}{}", resolved_url, separator, params.join("&"));
+            }
+        }
+        
         let mut resolved_headers = Vec::new();
         for (k, v) in &request.headers {
             resolved_headers.push((k.clone(), self.resolve_value(v)));
