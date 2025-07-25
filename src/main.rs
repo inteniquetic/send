@@ -20,6 +20,7 @@ struct HttpRequest {
     headers: Vec<(String, String)>,
     body: String,
     body_type: BodyType,
+    form_data: Vec<FormDataEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -28,6 +29,12 @@ enum BodyType {
     Raw,
     Json,
     FormData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+enum FormDataEntry {
+    Text { key: String, value: String },
+    File { key: String, file_path: String, file_name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +138,7 @@ impl Default for SendApp {
                 headers: vec![("Content-Type".to_string(), "application/json".to_string())],
                 body: String::new(),
                 body_type: BodyType::None,
+                form_data: vec![],
             },
             current_response: None,
             is_loading: false,
@@ -633,17 +641,21 @@ impl SendApp {
         // Body
         match self.current_request.body_type {
             BodyType::None => {}
-            BodyType::Raw | BodyType::FormData => {
+            BodyType::Raw => {
                 ui.label("Body:");
                 let body_response = ui.add(
                     TextEdit::multiline(&mut self.current_request.body)
                         .desired_rows(10)
                         .desired_width(ui.available_width())
-                        .hint_text("Enter raw or form data..."),
+                        .hint_text("Enter raw data..."),
                 );
                 if body_response.changed() {
                     self.save_current_request();
                 }
+            }
+            BodyType::FormData => {
+                ui.label("Form Data:");
+                self.draw_form_data_panel(ui);
             }
             BodyType::Json => {
                 ui.label(RichText::new("Body (JSON)").color(Color32::BLUE));
@@ -652,7 +664,7 @@ impl SendApp {
 
                 let theme = CodeTheme::default();
                 let lang = "json";
-                let job = highlight(ui.ctx(), ui.style(), &theme, &code, lang);
+                let _job = highlight(ui.ctx(), ui.style(), &theme, &code, lang);
 
                 let json_response = ui.add(
                     TextEdit::multiline(&mut code)
@@ -669,6 +681,119 @@ impl SendApp {
                 }
             }
         }
+    }
+
+    fn draw_form_data_panel(&mut self, ui: &mut Ui) {
+        ScrollArea::vertical().show(ui, |ui| {
+            let mut to_remove = Vec::new();
+            let mut form_data_changed = false;
+            
+            for (i, entry) in self.current_request.form_data.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    match entry {
+                        FormDataEntry::Text { key, value } => {
+                            ui.label("Text");
+                            let key_response = ui.add(
+                                TextEdit::singleline(key)
+                                    .hint_text("Key")
+                                    .desired_width(150.0)
+                            );
+                            let value_response = ui.add(
+                                TextEdit::singleline(value)
+                                    .hint_text("Value")
+                                    .desired_width(200.0)
+                            );
+                            if key_response.changed() || value_response.changed() {
+                                form_data_changed = true;
+                            }
+                        }
+                        FormDataEntry::File { key, file_path, file_name } => {
+                            ui.label("File");
+                            let key_response = ui.add(
+                                TextEdit::singleline(key)
+                                    .hint_text("Key")
+                                    .desired_width(150.0)
+                            );
+                            ui.label(if file_name.is_empty() { "No file selected" } else { file_name.as_str() });
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .set_title("Select File")
+                                    .pick_file()
+                                {
+                                    *file_path = path.to_string_lossy().to_string();
+                                    *file_name = path.file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string();
+                                    form_data_changed = true;
+                                }
+                            }
+                            if key_response.changed() {
+                                form_data_changed = true;
+                            }
+                        }
+                    }
+                    
+                    // Type toggle button
+                    let current_is_text = matches!(entry, FormDataEntry::Text { .. });
+                    let toggle_text = if current_is_text { "→File" } else { "→Text" };
+                    if ui.button(toggle_text).clicked() {
+                        if current_is_text {
+                            if let FormDataEntry::Text { key, .. } = entry {
+                                *entry = FormDataEntry::File {
+                                    key: key.clone(),
+                                    file_path: String::new(),
+                                    file_name: String::new(),
+                                };
+                            }
+                        } else {
+                            if let FormDataEntry::File { key, .. } = entry {
+                                *entry = FormDataEntry::Text {
+                                    key: key.clone(),
+                                    value: String::new(),
+                                };
+                            }
+                        }
+                        form_data_changed = true;
+                    }
+                    
+                    if ui.button("🗑").clicked() {
+                        to_remove.push(i);
+                    }
+                });
+            }
+            
+            // Remove entries
+            if !to_remove.is_empty() {
+                for &i in to_remove.iter().rev() {
+                    self.current_request.form_data.remove(i);
+                }
+                form_data_changed = true;
+            }
+            
+            // Add new entry button
+            ui.horizontal(|ui| {
+                if ui.button("Add Text Field").clicked() {
+                    self.current_request.form_data.push(FormDataEntry::Text {
+                        key: String::new(),
+                        value: String::new(),
+                    });
+                    form_data_changed = true;
+                }
+                if ui.button("Add File").clicked() {
+                    self.current_request.form_data.push(FormDataEntry::File {
+                        key: String::new(),
+                        file_path: String::new(),
+                        file_name: String::new(),
+                    });
+                    form_data_changed = true;
+                }
+            });
+            
+            if form_data_changed {
+                self.save_current_request();
+            }
+        });
     }
 
     fn draw_response_panel(&mut self, ui: &mut Ui) {
@@ -873,14 +998,51 @@ impl SendApp {
             let client = reqwest::Client::new();
             let mut req_builder = client.request(method, &resolved_url);
 
-            for (key, value) in &resolved_headers {
-                if !key.trim().is_empty() && !value.trim().is_empty() {
-                    req_builder = req_builder.header(key, value);
+            // Handle body based on type
+            match request.body_type {
+                BodyType::FormData if !request.form_data.is_empty() => {
+                    let mut form = reqwest::multipart::Form::new();
+                    
+                    for entry in &request.form_data {
+                        match entry {
+                            FormDataEntry::Text { key, value } => {
+                                if !key.trim().is_empty() {
+                                    form = form.text(key.clone(), value.clone());
+                                }
+                            }
+                            FormDataEntry::File { key, file_path, file_name } => {
+                                if !key.trim().is_empty() && !file_path.trim().is_empty() {
+                                    match tokio::fs::read(file_path).await {
+                                        Ok(file_data) => {
+                                            let part = reqwest::multipart::Part::bytes(file_data)
+                                                .file_name(file_name.clone());
+                                            form = form.part(key.clone(), part);
+                                        }
+                                        Err(_) => {
+                                            // If file can't be read, skip this entry
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    req_builder = req_builder.multipart(form);
                 }
-            }
-
-            if !resolved_body.trim().is_empty() {
-                req_builder = req_builder.body(resolved_body);
+                _ => {
+                    // Set headers for non-form-data requests
+                    for (key, value) in &resolved_headers {
+                        if !key.trim().is_empty() && !value.trim().is_empty() {
+                            req_builder = req_builder.header(key, value);
+                        }
+                    }
+                    
+                    // Set body for non-form-data requests
+                    if !resolved_body.trim().is_empty() {
+                        req_builder = req_builder.body(resolved_body);
+                    }
+                }
             }
 
             let result = match req_builder.send().await {
