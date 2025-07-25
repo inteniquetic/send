@@ -47,6 +47,8 @@ struct HttpResponse {
     headers: HashMap<String, String>,
     body: String,
     time: u128,
+    body_size: usize,
+    headers_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,12 +175,15 @@ impl eframe::App for SendApp {
                         self.is_loading = false;
                     }
                     Err(error) => {
+                        let error_body_size = error.len();
                         self.current_response = Some(HttpResponse {
                             status: 0,
                             status_text: "Error".to_string(),
                             headers: HashMap::new(),
                             body: error,
                             time: 0,
+                            body_size: error_body_size,
+                            headers_size: 0,
                         });
                         self.is_loading = false;
                     }
@@ -282,6 +287,18 @@ impl eframe::App for SendApp {
 }
 
 impl SendApp {
+    fn format_size(size: usize) -> String {
+        if size < 1024 {
+            format!("{} B", size)
+        } else if size < 1024 * 1024 {
+            format!("{:.1} KB", size as f64 / 1024.0)
+        } else if size < 1024 * 1024 * 1024 {
+            format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{:.1} GB", size as f64 / (1024.0 * 1024.0 * 1024.0))
+        }
+    }
+
     fn current_workspace(&self) -> &Workspace {
         &self.workspaces[self.current_workspace]
     }
@@ -938,6 +955,9 @@ impl SendApp {
                     .color(status_color),
                 );
                 ui.label(format!("Time: {}ms", response.time));
+                ui.label(format!("Size: {}", Self::format_size(response.body_size + response.headers_size)));
+                ui.label(format!("Body: {}", Self::format_size(response.body_size)));
+                ui.label(format!("Headers: {}", Self::format_size(response.headers_size)));
             });
             ui.separator();
             // Response tabs
@@ -1208,13 +1228,18 @@ impl SendApp {
                         .unwrap_or("Unknown")
                         .to_string();
                     let mut headers = HashMap::new();
+                    let mut headers_size = 0;
                     for (key, value) in response.headers() {
-                        headers.insert(key.to_string(), value.to_str().unwrap_or("").to_string());
+                        let key_str = key.to_string();
+                        let value_str = value.to_str().unwrap_or("").to_string();
+                        headers_size += key_str.len() + value_str.len() + 4; // +4 for ": " and "\r\n"
+                        headers.insert(key_str, value_str);
                     }
                     let body = response
                         .text()
                         .await
                         .unwrap_or_else(|e| format!("Error reading body: {}", e));
+                    let body_size = body.len();
                     let time = start_time.elapsed().as_millis();
 
                     Ok(HttpResponse {
@@ -1223,6 +1248,8 @@ impl SendApp {
                         headers,
                         body,
                         time,
+                        body_size,
+                        headers_size,
                     })
                 }
                 Err(e) => Err(format!("Request failed: {}", e)),
