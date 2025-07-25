@@ -1,7 +1,9 @@
 use eframe::{Result as EframeResult, egui};
 use egui::{Color32, RichText, ScrollArea, TextEdit, Ui};
+use egui_extras::syntax_highlighting::{CodeTheme, highlight};
 use egui_extras::{Size, StripBuilder, TableBuilder};
 use reqwest::{Method, header::HeaderMap};
+use rfd;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -50,32 +52,32 @@ struct Environment {
     variables: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppStorage {
+    collections: Vec<Collection>,
+    environments: Vec<Environment>,
+}
+
 struct SendApp {
     // Collections
     collections: Vec<Collection>,
     selected_collection: Option<usize>,
     selected_request: Option<usize>,
-
     // Current request
     current_request: HttpRequest,
-
     // Response
     current_response: Option<HttpResponse>,
     is_loading: bool,
-
     // Environment
     environments: Vec<Environment>,
     selected_environment: Option<usize>,
-
     // UI State
     show_collections: bool,
     show_environment: bool,
     response_tab: ResponseTab,
-
     // Runtime for async operations
     runtime: Runtime,
     response_receiver: Option<mpsc::Receiver<Result<HttpResponse, String>>>,
-
     // Dialogs
     new_collection_dialog: bool,
     new_collection_name: String,
@@ -166,6 +168,24 @@ impl eframe::App for SendApp {
                         self.new_request_dialog = true;
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui.button("Save Workspace...").clicked() {
+                        self.save_to_file();
+                        ui.close_menu();
+                    }
+                    if ui.button("Load Workspace...").clicked() {
+                        self.load_from_file();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Export Collection...").clicked() {
+                        self.export_collection();
+                        ui.close_menu();
+                    }
+                    if ui.button("Import Collection...").clicked() {
+                        self.import_collection();
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_collections, "Collections");
@@ -201,7 +221,6 @@ impl eframe::App for SendApp {
                     strip.cell(|ui| {
                         self.draw_request_panel(ui);
                     });
-
                     strip.cell(|ui| {
                         self.draw_response_panel(ui);
                     });
@@ -214,20 +233,93 @@ impl eframe::App for SendApp {
 }
 
 impl SendApp {
+    fn resolve_value(&self, input: &str) -> String {
+        let mut result = input.to_string();
+        if let Some(env_idx) = self.selected_environment {
+            if env_idx < self.environments.len() {
+                let env = &self.environments[env_idx];
+                for (key, value) in &env.variables {
+                    let placeholder = format!("{{{{{}}}}}", key);
+                    result = result.replace(&placeholder, value);
+                }
+            }
+        }
+        result
+    }
+
+    fn save_to_file(&self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Save Workspace")
+            .add_filter("JSON", &["json"])
+            .save_file()
+        {
+            let data = AppStorage {
+                collections: self.collections.clone(),
+                environments: self.environments.clone(),
+            };
+            let json = serde_json::to_string_pretty(&data).unwrap();
+            std::fs::write(path, json).ok();
+        }
+    }
+
+    fn load_from_file(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Load Workspace")
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(storage) = serde_json::from_str::<AppStorage>(&content) {
+                    self.collections = storage.collections;
+                    self.environments = storage.environments;
+                    self.selected_collection = self.collections.get(0).map(|_| 0);
+                    self.selected_request = None;
+                    self.selected_environment = self.environments.get(0).map(|_| 0);
+                }
+            }
+        }
+    }
+
+    fn export_collection(&self) {
+        if let Some(idx) = self.selected_collection {
+            if let Some(collection) = self.collections.get(idx) {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title(&format!("Export '{}'", collection.name))
+                    .add_filter("JSON", &["json"])
+                    .save_file()
+                {
+                    let json = serde_json::to_string_pretty(collection).unwrap();
+                    std::fs::write(path, json).ok();
+                }
+            }
+        }
+    }
+
+    fn import_collection(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Import Collection")
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(collection) = serde_json::from_str::<Collection>(&content) {
+                    self.collections.push(collection);
+                }
+            }
+        }
+    }
+
     fn draw_collections_panel(&mut self, ui: &mut Ui) {
         ui.heading("Collections");
         ui.separator();
-
         ScrollArea::vertical().show(ui, |ui| {
             for (collection_idx, collection) in self.collections.iter_mut().enumerate() {
                 let selected = self.selected_collection == Some(collection_idx);
                 let response = ui.selectable_label(selected, &collection.name);
-
                 if response.clicked() {
                     self.selected_collection = Some(collection_idx);
                     self.selected_request = None;
                 }
-
                 if selected {
                     ui.indent("requests", |ui| {
                         for (request_idx, request) in collection.requests.iter().enumerate() {
@@ -239,7 +331,6 @@ impl SendApp {
                                 "DELETE" => Color32::from_rgb(255, 0, 0),
                                 _ => Color32::GRAY,
                             };
-
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&request.method).color(method_color));
                                 if ui.selectable_label(selected_req, &request.name).clicked() {
@@ -257,7 +348,6 @@ impl SendApp {
     fn draw_environment_panel(&mut self, ui: &mut Ui) {
         ui.heading("Environment");
         ui.separator();
-
         // Environment selector
         if let Some(env_idx) = self.selected_environment {
             if env_idx < self.environments.len() {
@@ -274,21 +364,16 @@ impl SendApp {
                     });
             }
         }
-
         ui.separator();
-
         // Variables
         if let Some(env_idx) = self.selected_environment {
             if env_idx < self.environments.len() {
                 ui.label("Variables:");
-
                 ScrollArea::vertical().show(ui, |ui| {
                     let env = &mut self.environments[env_idx];
                     let mut to_remove = Vec::new();
-
                     for (i, (key, value)) in env.variables.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            // ui.text_edit_singleline(key);
                             ui.label(format!("{}:", key));
                             ui.text_edit_singleline(value);
                             if ui.button("🗑").clicked() {
@@ -296,14 +381,12 @@ impl SendApp {
                             }
                         });
                     }
-
                     for &i in to_remove.iter().rev() {
                         let keys: Vec<String> = env.variables.keys().cloned().collect();
                         if i < keys.len() {
                             env.variables.remove(&keys[i]);
                         }
                     }
-
                     if ui.button("Add Variable").clicked() {
                         env.variables
                             .insert(format!("key{}", env.variables.len()), "value".to_string());
@@ -316,7 +399,6 @@ impl SendApp {
     fn draw_request_panel(&mut self, ui: &mut Ui) {
         ui.heading("Request");
         ui.separator();
-
         // Method and URL
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_source("method")
@@ -351,13 +433,11 @@ impl SendApp {
                         "OPTIONS",
                     );
                 });
-
             ui.add(
                 TextEdit::singleline(&mut self.current_request.url)
-                    .hint_text("Enter URL...")
+                    .hint_text("Enter URL (supports {{variable}})...")
                     .desired_width(ui.available_width() - 80.0),
             );
-
             if ui
                 .button(if self.is_loading { "⏸" } else { "Send" })
                 .clicked()
@@ -366,9 +446,7 @@ impl SendApp {
                 self.send_request();
             }
         });
-
         ui.separator();
-
         // Tabs for request details
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.current_request.body_type, BodyType::None, "None");
@@ -380,27 +458,25 @@ impl SendApp {
                 "Form Data",
             );
         });
-
         ui.separator();
-
         // Headers
         ui.collapsing("Headers", |ui| {
             let mut to_remove = Vec::new();
-
             for (i, (key, value)) in self.current_request.headers.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     ui.add(TextEdit::singleline(key).hint_text("Header name"));
-                    ui.add(TextEdit::singleline(value).hint_text("Header value"));
+                    ui.add(
+                        TextEdit::singleline(value)
+                            .hint_text("Header value (supports {{variable}})"),
+                    );
                     if ui.button("🗑").clicked() {
                         to_remove.push(i);
                     }
                 });
             }
-
             for &i in to_remove.iter().rev() {
                 self.current_request.headers.remove(i);
             }
-
             if ui.button("Add Header").clicked() {
                 self.current_request
                     .headers
@@ -411,18 +487,32 @@ impl SendApp {
         // Body
         match self.current_request.body_type {
             BodyType::None => {}
-            BodyType::Raw | BodyType::Json | BodyType::FormData => {
+            BodyType::Raw | BodyType::FormData => {
                 ui.label("Body:");
                 ui.add(
                     TextEdit::multiline(&mut self.current_request.body)
                         .desired_rows(10)
                         .desired_width(ui.available_width())
-                        .hint_text(match self.current_request.body_type {
-                            BodyType::Json => "Enter JSON data...",
-                            BodyType::FormData => "Enter form data...",
-                            _ => "Enter raw data...",
-                        }),
+                        .hint_text("Enter raw or form data..."),
                 );
+            }
+            BodyType::Json => {
+                ui.label(RichText::new("Body (JSON)").color(Color32::BLUE));
+
+                let mut code = self.current_request.body.clone();
+
+                let theme = CodeTheme::default();
+                let lang = "json";
+                let job = highlight(ui.ctx(), ui.style(), &theme, &code, lang);
+
+                ui.add(
+                    TextEdit::multiline(&mut code)
+                        .code_editor()
+                        .desired_rows(10)
+                        .desired_width(ui.available_width()),
+                );
+
+                self.current_request.body = code;
             }
         }
     }
@@ -435,7 +525,6 @@ impl SendApp {
             }
         });
         ui.separator();
-
         if let Some(response) = &self.current_response {
             // Status and time
             ui.horizontal(|ui| {
@@ -446,7 +535,6 @@ impl SendApp {
                 } else {
                     Color32::from_rgb(255, 165, 0)
                 };
-
                 ui.label(
                     RichText::new(format!(
                         "Status: {} {}",
@@ -456,18 +544,14 @@ impl SendApp {
                 );
                 ui.label(format!("Time: {}ms", response.time));
             });
-
             ui.separator();
-
             // Response tabs
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.response_tab, ResponseTab::Body, "Body");
                 ui.selectable_value(&mut self.response_tab, ResponseTab::Headers, "Headers");
                 ui.selectable_value(&mut self.response_tab, ResponseTab::Cookies, "Cookies");
             });
-
             ui.separator();
-
             // Response content
             ScrollArea::vertical().show(ui, |ui| match self.response_tab {
                 ResponseTab::Body => {
@@ -506,7 +590,6 @@ impl SendApp {
                 .show(ctx, |ui| {
                     ui.label("Collection Name:");
                     ui.text_edit_singleline(&mut self.new_collection_name);
-
                     ui.horizontal(|ui| {
                         if ui.button("Create").clicked() {
                             if !self.new_collection_name.trim().is_empty() {
@@ -535,7 +618,6 @@ impl SendApp {
                 .show(ctx, |ui| {
                     ui.label("Request Name:");
                     ui.text_edit_singleline(&mut self.new_request_name);
-
                     ui.horizontal(|ui| {
                         if ui.button("Create").clicked() {
                             if !self.new_request_name.trim().is_empty() {
@@ -544,7 +626,6 @@ impl SendApp {
                                         let mut new_request = self.current_request.clone();
                                         new_request.id = Uuid::new_v4().to_string();
                                         new_request.name = self.new_request_name.clone();
-
                                         self.collections[collection_idx].requests.push(new_request);
                                         self.new_request_name.clear();
                                         self.new_request_dialog = false;
@@ -564,15 +645,19 @@ impl SendApp {
     fn send_request(&mut self) {
         self.is_loading = true;
         self.current_response = None;
-
         let request = self.current_request.clone();
         let (tx, rx) = mpsc::channel();
         self.response_receiver = Some(rx);
 
+        let resolved_url = self.resolve_value(&request.url);
+        let mut resolved_headers = Vec::new();
+        for (k, v) in &request.headers {
+            resolved_headers.push((k.clone(), self.resolve_value(v)));
+        }
+        let resolved_body = self.resolve_value(&request.body);
+
         self.runtime.spawn(async move {
             let start_time = Instant::now();
-
-            // Parse method
             let method = match request.method.as_str() {
                 "GET" => Method::GET,
                 "POST" => Method::POST,
@@ -584,25 +669,19 @@ impl SendApp {
                 _ => Method::GET,
             };
 
-            // Create client
             let client = reqwest::Client::new();
+            let mut req_builder = client.request(method, &resolved_url);
 
-            // Build request
-            let mut req_builder = client.request(method, &request.url);
-
-            // Add headers
-            for (key, value) in &request.headers {
+            for (key, value) in &resolved_headers {
                 if !key.trim().is_empty() && !value.trim().is_empty() {
                     req_builder = req_builder.header(key, value);
                 }
             }
 
-            // Add body
-            if !request.body.trim().is_empty() {
-                req_builder = req_builder.body(request.body);
+            if !resolved_body.trim().is_empty() {
+                req_builder = req_builder.body(resolved_body);
             }
 
-            // Send request
             let result = match req_builder.send().await {
                 Ok(response) => {
                     let status = response.status().as_u16();
@@ -611,19 +690,14 @@ impl SendApp {
                         .canonical_reason()
                         .unwrap_or("Unknown")
                         .to_string();
-
-                    // Get headers
                     let mut headers = HashMap::new();
                     for (key, value) in response.headers() {
                         headers.insert(key.to_string(), value.to_str().unwrap_or("").to_string());
                     }
-
-                    // Get body
                     let body = response
                         .text()
                         .await
                         .unwrap_or_else(|e| format!("Error reading body: {}", e));
-
                     let time = start_time.elapsed().as_millis();
 
                     Ok(HttpResponse {
@@ -649,7 +723,6 @@ fn main() -> EframeResult<()> {
             .with_min_inner_size([800.0, 600.0]),
         ..Default::default()
     };
-
     eframe::run_native(
         "Send - HTTP Client",
         options,
