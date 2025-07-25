@@ -58,19 +58,26 @@ struct AppStorage {
     environments: Vec<Environment>,
 }
 
-struct SendApp {
-    // Collections
+#[derive(Debug, Clone)]
+struct Workspace {
+    name: String,
+    file_path: Option<std::path::PathBuf>,
     collections: Vec<Collection>,
+    environments: Vec<Environment>,
     selected_collection: Option<usize>,
     selected_request: Option<usize>,
+    selected_environment: Option<usize>,
+}
+
+struct SendApp {
+    // Workspaces
+    workspaces: Vec<Workspace>,
+    current_workspace: usize,
     // Current request
     current_request: HttpRequest,
     // Response
     current_response: Option<HttpResponse>,
     is_loading: bool,
-    // Environment
-    environments: Vec<Environment>,
-    selected_environment: Option<usize>,
     // UI State
     show_collections: bool,
     show_environment: bool,
@@ -83,8 +90,8 @@ struct SendApp {
     new_collection_name: String,
     new_request_dialog: bool,
     new_request_name: String,
-    // Auto-save
-    workspace_file: Option<std::path::PathBuf>,
+    new_workspace_dialog: bool,
+    new_workspace_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,14 +103,26 @@ enum ResponseTab {
 
 impl Default for SendApp {
     fn default() -> Self {
-        Self {
+        let default_workspace = Workspace {
+            name: "Default Workspace".to_string(),
+            file_path: None,
             collections: vec![Collection {
                 id: Uuid::new_v4().to_string(),
                 name: "Default Collection".to_string(),
                 requests: vec![],
             }],
+            environments: vec![Environment {
+                name: "Default".to_string(),
+                variables: HashMap::new(),
+            }],
             selected_collection: Some(0),
             selected_request: None,
+            selected_environment: Some(0),
+        };
+
+        Self {
+            workspaces: vec![default_workspace],
+            current_workspace: 0,
             current_request: HttpRequest {
                 id: Uuid::new_v4().to_string(),
                 name: "New Request".to_string(),
@@ -115,11 +134,6 @@ impl Default for SendApp {
             },
             current_response: None,
             is_loading: false,
-            environments: vec![Environment {
-                name: "Default".to_string(),
-                variables: HashMap::new(),
-            }],
-            selected_environment: Some(0),
             show_collections: true,
             show_environment: false,
             response_tab: ResponseTab::Body,
@@ -129,7 +143,8 @@ impl Default for SendApp {
             new_collection_name: String::new(),
             new_request_dialog: false,
             new_request_name: String::new(),
-            workspace_file: None,
+            new_workspace_dialog: false,
+            new_workspace_name: String::new(),
         }
     }
 }
@@ -163,6 +178,11 @@ impl eframe::App for SendApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("New Workspace").clicked() {
+                        self.new_workspace_dialog = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("New Collection").clicked() {
                         self.new_collection_dialog = true;
                         ui.close_menu();
@@ -193,6 +213,19 @@ impl eframe::App for SendApp {
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_collections, "Collections");
                     ui.checkbox(&mut self.show_environment, "Environment");
+                });
+                
+                ui.separator();
+                
+                // Workspace tabs
+                ui.horizontal(|ui| {
+                    ui.label("Workspaces:");
+                    for (idx, workspace) in self.workspaces.iter().enumerate() {
+                        let selected = idx == self.current_workspace;
+                        if ui.selectable_label(selected, &workspace.name).clicked() {
+                            self.current_workspace = idx;
+                        }
+                    }
                 });
             });
         });
@@ -236,20 +269,31 @@ impl eframe::App for SendApp {
 }
 
 impl SendApp {
+    fn current_workspace(&self) -> &Workspace {
+        &self.workspaces[self.current_workspace]
+    }
+
+    fn current_workspace_mut(&mut self) -> &mut Workspace {
+        &mut self.workspaces[self.current_workspace]
+    }
+
     fn save_current_request(&mut self) {
-        if let (Some(collection_idx), Some(request_idx)) = (self.selected_collection, self.selected_request) {
-            if collection_idx < self.collections.len() && request_idx < self.collections[collection_idx].requests.len() {
-                self.collections[collection_idx].requests[request_idx] = self.current_request.clone();
+        let current_request = self.current_request.clone();
+        let workspace = self.current_workspace_mut();
+        if let (Some(collection_idx), Some(request_idx)) = (workspace.selected_collection, workspace.selected_request) {
+            if collection_idx < workspace.collections.len() && request_idx < workspace.collections[collection_idx].requests.len() {
+                workspace.collections[collection_idx].requests[request_idx] = current_request;
                 self.auto_save_workspace();
             }
         }
     }
 
     fn auto_save_workspace(&self) {
-        if let Some(path) = &self.workspace_file {
+        let workspace = self.current_workspace();
+        if let Some(path) = &workspace.file_path {
             let data = AppStorage {
-                collections: self.collections.clone(),
-                environments: self.environments.clone(),
+                collections: workspace.collections.clone(),
+                environments: workspace.environments.clone(),
             };
             if let Ok(json) = serde_json::to_string_pretty(&data) {
                 let _ = std::fs::write(path, json);
@@ -259,9 +303,10 @@ impl SendApp {
 
     fn resolve_value(&self, input: &str) -> String {
         let mut result = input.to_string();
-        if let Some(env_idx) = self.selected_environment {
-            if env_idx < self.environments.len() {
-                let env = &self.environments[env_idx];
+        let workspace = self.current_workspace();
+        if let Some(env_idx) = workspace.selected_environment {
+            if env_idx < workspace.environments.len() {
+                let env = &workspace.environments[env_idx];
                 for (key, value) in &env.variables {
                     let placeholder = format!("{{{{{}}}}}", key);
                     result = result.replace(&placeholder, value);
@@ -277,13 +322,14 @@ impl SendApp {
             .add_filter("JSON", &["json"])
             .save_file()
         {
+            let workspace = self.current_workspace_mut();
             let data = AppStorage {
-                collections: self.collections.clone(),
-                environments: self.environments.clone(),
+                collections: workspace.collections.clone(),
+                environments: workspace.environments.clone(),
             };
             let json = serde_json::to_string_pretty(&data).unwrap();
             if std::fs::write(&path, json).is_ok() {
-                self.workspace_file = Some(path);
+                workspace.file_path = Some(path);
             }
         }
     }
@@ -296,20 +342,35 @@ impl SendApp {
         {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(storage) = serde_json::from_str::<AppStorage>(&content) {
-                    self.collections = storage.collections;
-                    self.environments = storage.environments;
-                    self.selected_collection = self.collections.get(0).map(|_| 0);
-                    self.selected_request = None;
-                    self.selected_environment = self.environments.get(0).map(|_| 0);
-                    self.workspace_file = Some(path);
+                    let workspace_name = path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Loaded Workspace")
+                        .to_string();
+                    
+                    let selected_collection = if !storage.collections.is_empty() { Some(0) } else { None };
+                    let selected_environment = if !storage.environments.is_empty() { Some(0) } else { None };
+                    
+                    let new_workspace = Workspace {
+                        name: workspace_name,
+                        file_path: Some(path),
+                        collections: storage.collections,
+                        environments: storage.environments,
+                        selected_collection,
+                        selected_request: None,
+                        selected_environment,
+                    };
+                    
+                    self.workspaces.push(new_workspace);
+                    self.current_workspace = self.workspaces.len() - 1;
                 }
             }
         }
     }
 
     fn export_collection(&self) {
-        if let Some(idx) = self.selected_collection {
-            if let Some(collection) = self.collections.get(idx) {
+        let workspace = self.current_workspace();
+        if let Some(idx) = workspace.selected_collection {
+            if let Some(collection) = workspace.collections.get(idx) {
                 if let Some(path) = rfd::FileDialog::new()
                     .set_title(&format!("Export '{}'", collection.name))
                     .add_filter("JSON", &["json"])
@@ -330,7 +391,8 @@ impl SendApp {
         {
             if let Ok(content) = std::fs::read_to_string(path) {
                 if let Ok(collection) = serde_json::from_str::<Collection>(&content) {
-                    self.collections.push(collection);
+                    self.current_workspace_mut().collections.push(collection);
+                    self.auto_save_workspace();
                 }
             }
         }
@@ -339,18 +401,25 @@ impl SendApp {
     fn draw_collections_panel(&mut self, ui: &mut Ui) {
         ui.heading("Collections");
         ui.separator();
+        
+        let current_workspace_idx = self.current_workspace;
+        let mut selected_collection = None;
+        let mut selected_request = None;
+        let mut new_current_request = None;
+        
         ScrollArea::vertical().show(ui, |ui| {
-            for (collection_idx, collection) in self.collections.iter_mut().enumerate() {
-                let selected = self.selected_collection == Some(collection_idx);
-                let response = ui.selectable_label(selected, &collection.name);
+            let workspace = &mut self.workspaces[current_workspace_idx];
+            for (collection_idx, collection) in workspace.collections.iter_mut().enumerate() {
+                let is_selected = workspace.selected_collection == Some(collection_idx);
+                let response = ui.selectable_label(is_selected, &collection.name);
                 if response.clicked() {
-                    self.selected_collection = Some(collection_idx);
-                    self.selected_request = None;
+                    selected_collection = Some(collection_idx);
+                    selected_request = None;
                 }
-                if selected {
+                if is_selected {
                     ui.indent("requests", |ui| {
                         for (request_idx, request) in collection.requests.iter().enumerate() {
-                            let selected_req = self.selected_request == Some(request_idx);
+                            let selected_req = workspace.selected_request == Some(request_idx);
                             let method_color = match request.method.as_str() {
                                 "GET" => Color32::from_rgb(0, 128, 0),
                                 "POST" => Color32::from_rgb(255, 165, 0),
@@ -361,8 +430,8 @@ impl SendApp {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&request.method).color(method_color));
                                 if ui.selectable_label(selected_req, &request.name).clicked() {
-                                    self.selected_request = Some(request_idx);
-                                    self.current_request = request.clone();
+                                    selected_request = Some(request_idx);
+                                    new_current_request = Some(request.clone());
                                 }
                             });
                         }
@@ -370,20 +439,36 @@ impl SendApp {
                 }
             }
         });
+        
+        if let Some(collection_idx) = selected_collection {
+            self.workspaces[current_workspace_idx].selected_collection = Some(collection_idx);
+            self.workspaces[current_workspace_idx].selected_request = selected_request;
+        }
+        if let Some(request_idx) = selected_request {
+            self.workspaces[current_workspace_idx].selected_request = Some(request_idx);
+        }
+        if let Some(request) = new_current_request {
+            self.current_request = request;
+        }
     }
 
     fn draw_environment_panel(&mut self, ui: &mut Ui) {
         ui.heading("Environment");
         ui.separator();
+        
+        let current_workspace_idx = self.current_workspace;
+        let mut env_changed = false;
+        
         // Environment selector
-        if let Some(env_idx) = self.selected_environment {
-            if env_idx < self.environments.len() {
+        let workspace = &mut self.workspaces[current_workspace_idx];
+        if let Some(env_idx) = workspace.selected_environment {
+            if env_idx < workspace.environments.len() {
                 egui::ComboBox::from_label("Environment")
-                    .selected_text(&self.environments[env_idx].name)
+                    .selected_text(&workspace.environments[env_idx].name)
                     .show_ui(ui, |ui| {
-                        for (idx, env) in self.environments.iter().enumerate() {
+                        for (idx, env) in workspace.environments.iter().enumerate() {
                             ui.selectable_value(
-                                &mut self.selected_environment,
+                                &mut workspace.selected_environment,
                                 Some(idx),
                                 &env.name,
                             );
@@ -393,13 +478,13 @@ impl SendApp {
         }
         ui.separator();
         // Variables
-        if let Some(env_idx) = self.selected_environment {
-            if env_idx < self.environments.len() {
+        if let Some(env_idx) = workspace.selected_environment {
+            if env_idx < workspace.environments.len() {
                 ui.label("Variables:");
                 ScrollArea::vertical().show(ui, |ui| {
-                    let env = &mut self.environments[env_idx];
+                    let workspace = &mut self.workspaces[current_workspace_idx];
+                    let env = &mut workspace.environments[env_idx];
                     let mut to_remove = Vec::new();
-                    let mut env_changed = false;
                     for (i, (key, value)) in env.variables.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(format!("{}:", key));
@@ -425,11 +510,12 @@ impl SendApp {
                             .insert(format!("key{}", env.variables.len()), "value".to_string());
                         env_changed = true;
                     }
-                    if env_changed {
-                        self.auto_save_workspace();
-                    }
                 });
             }
+        }
+        
+        if env_changed {
+            self.auto_save_workspace();
         }
     }
 
@@ -661,9 +747,10 @@ impl SendApp {
                     ui.horizontal(|ui| {
                         if ui.button("Create").clicked() {
                             if !self.new_collection_name.trim().is_empty() {
-                                self.collections.push(Collection {
+                                let collection_name = self.new_collection_name.clone();
+                                self.current_workspace_mut().collections.push(Collection {
                                     id: Uuid::new_v4().to_string(),
-                                    name: self.new_collection_name.clone(),
+                                    name: collection_name,
                                     requests: vec![],
                                 });
                                 self.new_collection_name.clear();
@@ -690,12 +777,15 @@ impl SendApp {
                     ui.horizontal(|ui| {
                         if ui.button("Create").clicked() {
                             if !self.new_request_name.trim().is_empty() {
-                                if let Some(collection_idx) = self.selected_collection {
-                                    if collection_idx < self.collections.len() {
-                                        let mut new_request = self.current_request.clone();
+                                let request_name = self.new_request_name.clone();
+                                let current_request = self.current_request.clone();
+                                let workspace = self.current_workspace_mut();
+                                if let Some(collection_idx) = workspace.selected_collection {
+                                    if collection_idx < workspace.collections.len() {
+                                        let mut new_request = current_request;
                                         new_request.id = Uuid::new_v4().to_string();
-                                        new_request.name = self.new_request_name.clone();
-                                        self.collections[collection_idx].requests.push(new_request);
+                                        new_request.name = request_name;
+                                        workspace.collections[collection_idx].requests.push(new_request);
                                         self.new_request_name.clear();
                                         self.new_request_dialog = false;
                                         self.auto_save_workspace();
@@ -706,6 +796,47 @@ impl SendApp {
                         if ui.button("Cancel").clicked() {
                             self.new_request_name.clear();
                             self.new_request_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        // New Workspace Dialog
+        if self.new_workspace_dialog {
+            egui::Window::new("New Workspace")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Workspace Name:");
+                    ui.text_edit_singleline(&mut self.new_workspace_name);
+                    ui.horizontal(|ui| {
+                        if ui.button("Create").clicked() {
+                            if !self.new_workspace_name.trim().is_empty() {
+                                let new_workspace = Workspace {
+                                    name: self.new_workspace_name.clone(),
+                                    file_path: None,
+                                    collections: vec![Collection {
+                                        id: Uuid::new_v4().to_string(),
+                                        name: "Default Collection".to_string(),
+                                        requests: vec![],
+                                    }],
+                                    environments: vec![Environment {
+                                        name: "Default".to_string(),
+                                        variables: HashMap::new(),
+                                    }],
+                                    selected_collection: Some(0),
+                                    selected_request: None,
+                                    selected_environment: Some(0),
+                                };
+                                self.workspaces.push(new_workspace);
+                                self.current_workspace = self.workspaces.len() - 1;
+                                self.new_workspace_name.clear();
+                                self.new_workspace_dialog = false;
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.new_workspace_name.clear();
+                            self.new_workspace_dialog = false;
                         }
                     });
                 });
