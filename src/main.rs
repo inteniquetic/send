@@ -108,6 +108,8 @@ struct SendApp {
     is_loading: bool,
     // UI State
     selected_sidebar_item: Option<SidebarItem>,
+    request_tab: RequestTab,
+    raw_body_type: RawBodyType,
     response_tab: ResponseTab,
     // Runtime for async operations
     runtime: Runtime,
@@ -136,6 +138,22 @@ enum ResponseTab {
 enum SidebarItem {
     Collections,
     Environment,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RequestTab {
+    Params,
+    Headers,
+    Body,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RawBodyType {
+    Text,
+    JavaScript,
+    JSON,
+    HTML,
+    XML,
 }
 
 impl Default for SendApp {
@@ -181,6 +199,8 @@ impl Default for SendApp {
             current_response: None,
             is_loading: false,
             selected_sidebar_item: None,
+            request_tab: RequestTab::Params,
+            raw_body_type: RawBodyType::JSON,
             response_tab: ResponseTab::Body,
             runtime: Runtime::new().unwrap(),
             response_receiver: None,
@@ -861,6 +881,12 @@ impl SendApp {
     }
 
     fn draw_request_panel(&mut self, ui: &mut Ui) {
+        // Migrate old JSON body type to Raw with JSON sub-type for consistency
+        if self.current_request.body_type == BodyType::Json {
+            self.current_request.body_type = BodyType::Raw;
+            self.raw_body_type = RawBodyType::JSON;
+        }
+        
         ui.heading("Request");
         ui.separator();
         // Method and URL
@@ -936,37 +962,95 @@ impl SendApp {
         });
         ui.separator();
 
-        // Query Parameters
-        ui.collapsing("Query Params", |ui| {
-            self.draw_query_params_panel(ui);
+        // Request tabs (Postman style)
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.request_tab, RequestTab::Params, "Params");
+            ui.selectable_value(&mut self.request_tab, RequestTab::Headers, "Headers");
+            ui.selectable_value(&mut self.request_tab, RequestTab::Body, "Body");
         });
+        ui.separator();
 
-        // Tabs for request details
+        // Tab content
+        match self.request_tab {
+            RequestTab::Params => {
+                self.draw_query_params_panel(ui);
+            }
+            RequestTab::Headers => {
+                self.draw_headers_panel(ui);
+            }
+            RequestTab::Body => {
+                self.draw_body_panel(ui);
+            }
+        }
+    }
+
+    fn draw_headers_panel(&mut self, ui: &mut Ui) {
+        ScrollArea::vertical().show(ui, |ui| {
+            let mut to_remove = Vec::new();
+            let mut headers_changed = false;
+            
+            // Table header
+            ui.horizontal(|ui| {
+                ui.label("Header Name");
+                ui.add_space(150.0);
+                ui.label("Header Value");
+            });
+            ui.separator();
+            
+            for (i, (key, value)) in self.current_request.headers.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    let key_response = ui.add(
+                        TextEdit::singleline(key)
+                            .hint_text("Header name")
+                            .desired_width(200.0)
+                    );
+                    let value_response = ui.add(
+                        TextEdit::singleline(value)
+                            .hint_text("Header value (supports {{variable}})")
+                            .desired_width(300.0)
+                    );
+                    if key_response.changed() || value_response.changed() {
+                        headers_changed = true;
+                    }
+                    if ui.button("🗑").clicked() {
+                        to_remove.push(i);
+                    }
+                });
+            }
+            
+            // Remove headers
+            if !to_remove.is_empty() {
+                for &i in to_remove.iter().rev() {
+                    self.current_request.headers.remove(i);
+                }
+                headers_changed = true;
+            }
+            
+            // Add new header button
+            if ui.button("Add Header").clicked() {
+                self.current_request
+                    .headers
+                    .push((String::new(), String::new()));
+                headers_changed = true;
+            }
+            
+            if headers_changed {
+                self.save_current_request();
+            }
+        });
+    }
+
+    fn draw_body_panel(&mut self, ui: &mut Ui) {
+        // Body type tabs (Postman style)
         ui.horizontal(|ui| {
             if ui
-                .selectable_value(&mut self.current_request.body_type, BodyType::None, "None")
+                .selectable_value(&mut self.current_request.body_type, BodyType::None, "none")
                 .changed()
             {
                 self.save_current_request();
             }
             if ui
-                .selectable_value(&mut self.current_request.body_type, BodyType::Raw, "Raw")
-                .changed()
-            {
-                self.save_current_request();
-            }
-            if ui
-                .selectable_value(&mut self.current_request.body_type, BodyType::Json, "JSON")
-                .changed()
-            {
-                self.save_current_request();
-            }
-            if ui
-                .selectable_value(
-                    &mut self.current_request.body_type,
-                    BodyType::FormData,
-                    "Form Data",
-                )
+                .selectable_value(&mut self.current_request.body_type, BodyType::FormData, "form-data")
                 .changed()
             {
                 self.save_current_request();
@@ -981,67 +1065,77 @@ impl SendApp {
             {
                 self.save_current_request();
             }
-        });
-        ui.separator();
-        // Headers
-        ui.collapsing("Headers", |ui| {
-            let mut to_remove = Vec::new();
-            let mut headers_changed = false;
-            for (i, (key, value)) in self.current_request.headers.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    let key_response = ui.add(TextEdit::singleline(key).hint_text("Header name"));
-                    let value_response = ui.add(
-                        TextEdit::singleline(value)
-                            .hint_text("Header value (supports {{variable}})"),
-                    );
-                    if key_response.changed() || value_response.changed() {
-                        headers_changed = true;
-                    }
-                    if ui.button("🗑").clicked() {
-                        to_remove.push(i);
-                    }
-                });
-            }
-            for &i in to_remove.iter().rev() {
-                self.current_request.headers.remove(i);
-                headers_changed = true;
-            }
-            if ui.button("Add Header").clicked() {
-                self.current_request
-                    .headers
-                    .push((String::new(), String::new()));
-                headers_changed = true;
-            }
-            if headers_changed {
+            if ui
+                .selectable_value(&mut self.current_request.body_type, BodyType::Raw, "raw")
+                .changed()
+            {
                 self.save_current_request();
             }
         });
 
-        // Body
+        // Raw sub-tabs (shown when Raw is selected)
+        if self.current_request.body_type == BodyType::Raw {
+            ui.horizontal(|ui| {
+                ui.label("  "); // Indent for sub-tabs
+                ui.selectable_value(&mut self.raw_body_type, RawBodyType::Text, "Text");
+                ui.selectable_value(&mut self.raw_body_type, RawBodyType::JavaScript, "JavaScript");
+                ui.selectable_value(&mut self.raw_body_type, RawBodyType::JSON, "JSON");
+                ui.selectable_value(&mut self.raw_body_type, RawBodyType::HTML, "HTML");
+                ui.selectable_value(&mut self.raw_body_type, RawBodyType::XML, "XML");
+            });
+        }
+        
+        ui.separator();
+
+        // Body content based on type
         match self.current_request.body_type {
-            BodyType::None => {}
-            BodyType::Raw => {
-                ui.label("Body:");
-                let body_response = ui.add(
-                    TextEdit::multiline(&mut self.current_request.body)
-                        .desired_rows(10)
-                        .desired_width(ui.available_width())
-                        .hint_text("Enter raw data..."),
-                );
-                if body_response.changed() {
-                    self.save_current_request();
-                }
+            BodyType::None => {
+                ui.label("This request does not have a body");
             }
             BodyType::FormData => {
-                ui.label("Form Data:");
                 self.draw_form_data_panel(ui);
             }
             BodyType::UrlEncoded => {
-                ui.label("URL-Encoded Form Data:");
                 self.draw_url_encoded_panel(ui);
             }
+            BodyType::Raw => {
+                // Raw body editor with syntax highlighting based on sub-type
+                let (lang, hint, use_code_editor) = match self.raw_body_type {
+                    RawBodyType::Text => ("text", "Enter plain text...", false),
+                    RawBodyType::JavaScript => ("javascript", "Enter JavaScript code...", true),
+                    RawBodyType::JSON => ("json", "Enter JSON data...", true),
+                    RawBodyType::HTML => ("html", "Enter HTML content...", true),
+                    RawBodyType::XML => ("xml", "Enter XML content...", true),
+                };
+
+                let mut code = self.current_request.body.clone();
+
+                if use_code_editor {
+                    let theme = CodeTheme::default();
+                    let _job = highlight(ui.ctx(), ui.style(), &theme, &code, lang);
+                }
+
+                let text_edit = TextEdit::multiline(&mut code)
+                    .desired_rows(12)
+                    .desired_width(ui.available_width())
+                    .hint_text(hint);
+
+                let body_response = if use_code_editor {
+                    ui.add(text_edit.code_editor())
+                } else {
+                    ui.add(text_edit)
+                };
+
+                if code != self.current_request.body {
+                    self.current_request.body = code;
+                    if body_response.changed() {
+                        self.save_current_request();
+                    }
+                }
+            }
             BodyType::Json => {
-                ui.label(RichText::new("Body (JSON)").color(Color32::BLUE));
+                // This should not be reached anymore, but keeping for backwards compatibility
+                ui.label(RichText::new("JSON").color(Color32::from_rgb(0, 150, 255)));
 
                 let mut code = self.current_request.body.clone();
 
@@ -1052,8 +1146,9 @@ impl SendApp {
                 let json_response = ui.add(
                     TextEdit::multiline(&mut code)
                         .code_editor()
-                        .desired_rows(10)
-                        .desired_width(ui.available_width()),
+                        .desired_rows(12)
+                        .desired_width(ui.available_width())
+                        .hint_text("Enter JSON data..."),
                 );
 
                 if code != self.current_request.body {
@@ -1242,51 +1337,61 @@ impl SendApp {
     }
 
     fn draw_query_params_panel(&mut self, ui: &mut Ui) {
-        let mut to_remove = Vec::new();
-        let mut query_params_changed = false;
+        ScrollArea::vertical().show(ui, |ui| {
+            let mut to_remove = Vec::new();
+            let mut query_params_changed = false;
 
-        for (i, (key, value)) in self.current_request.query_params.iter_mut().enumerate() {
+            // Table header
             ui.horizontal(|ui| {
-                let key_response = ui.add(
-                    TextEdit::singleline(key)
-                        .hint_text("Parameter name")
-                        .desired_width(200.0),
-                );
-                let value_response = ui.add(
-                    TextEdit::singleline(value)
-                        .hint_text("Parameter value")
-                        .desired_width(250.0),
-                );
-
-                if key_response.changed() || value_response.changed() {
-                    query_params_changed = true;
-                }
-
-                if ui.button("🗑").clicked() {
-                    to_remove.push(i);
-                }
+                ui.label("Parameter Name");
+                ui.add_space(150.0);
+                ui.label("Parameter Value");
             });
-        }
+            ui.separator();
 
-        // Remove entries
-        if !to_remove.is_empty() {
-            for &i in to_remove.iter().rev() {
-                self.current_request.query_params.remove(i);
+            for (i, (key, value)) in self.current_request.query_params.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    let key_response = ui.add(
+                        TextEdit::singleline(key)
+                            .hint_text("Parameter name")
+                            .desired_width(200.0),
+                    );
+                    let value_response = ui.add(
+                        TextEdit::singleline(value)
+                            .hint_text("Parameter value (supports {{variable}})")
+                            .desired_width(300.0),
+                    );
+
+                    if key_response.changed() || value_response.changed() {
+                        query_params_changed = true;
+                    }
+
+                    if ui.button("🗑").clicked() {
+                        to_remove.push(i);
+                    }
+                });
             }
-            query_params_changed = true;
-        }
 
-        // Add new entry button
-        if ui.button("Add Query Parameter").clicked() {
-            self.current_request
-                .query_params
-                .push((String::new(), String::new()));
-            query_params_changed = true;
-        }
+            // Remove entries
+            if !to_remove.is_empty() {
+                for &i in to_remove.iter().rev() {
+                    self.current_request.query_params.remove(i);
+                }
+                query_params_changed = true;
+            }
 
-        if query_params_changed {
-            self.save_current_request();
-        }
+            // Add new entry button
+            if ui.button("Add Query Parameter").clicked() {
+                self.current_request
+                    .query_params
+                    .push((String::new(), String::new()));
+                query_params_changed = true;
+            }
+
+            if query_params_changed {
+                self.save_current_request();
+            }
+        });
     }
 
     fn draw_response_panel(&mut self, ui: &mut Ui) {
