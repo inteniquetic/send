@@ -189,7 +189,7 @@ impl Default for SendApp {
                 name: "New Request".to_string(),
                 method: "GET".to_string(),
                 url: "https://httpbin.org/get".to_string(),
-                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                headers: vec![],
                 body: String::new(),
                 body_type: BodyType::None,
                 form_data: vec![],
@@ -413,6 +413,18 @@ impl eframe::App for SendApp {
     }
 }
 
+impl RawBodyType {
+    fn get_content_type(&self) -> &'static str {
+        match self {
+            RawBodyType::Text => "text/plain",
+            RawBodyType::JavaScript => "application/javascript",
+            RawBodyType::JSON => "application/json",
+            RawBodyType::HTML => "text/html",
+            RawBodyType::XML => "application/xml",
+        }
+    }
+}
+
 impl SendApp {
     fn format_size(size: usize) -> String {
         if size < 1024 {
@@ -488,6 +500,26 @@ impl SendApp {
                 }
             }
         }
+    }
+
+    fn set_content_type_header(&mut self, content_type: &str) {
+        // Find existing Content-Type header (case-insensitive)
+        let content_type_index = self.current_request.headers
+            .iter()
+            .position(|(key, _)| key.to_lowercase() == "content-type");
+        
+        if let Some(index) = content_type_index {
+            // Update existing Content-Type header
+            self.current_request.headers[index].1 = content_type.to_string();
+        } else {
+            // Add new Content-Type header
+            self.current_request.headers.push(("Content-Type".to_string(), content_type.to_string()));
+        }
+    }
+    
+    fn remove_content_type_header(&mut self) {
+        // Remove Content-Type header when body type is None
+        self.current_request.headers.retain(|(key, _)| key.to_lowercase() != "content-type");
     }
 
     fn auto_save_workspace(&self) {
@@ -886,7 +918,7 @@ impl SendApp {
             self.current_request.body_type = BodyType::Raw;
             self.raw_body_type = RawBodyType::JSON;
         }
-        
+
         ui.heading("Request");
         ui.separator();
         // Method and URL
@@ -988,7 +1020,7 @@ impl SendApp {
         ScrollArea::vertical().show(ui, |ui| {
             let mut to_remove = Vec::new();
             let mut headers_changed = false;
-            
+
             // Table header
             ui.horizontal(|ui| {
                 ui.label("Header Name");
@@ -996,18 +1028,18 @@ impl SendApp {
                 ui.label("Header Value");
             });
             ui.separator();
-            
+
             for (i, (key, value)) in self.current_request.headers.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     let key_response = ui.add(
                         TextEdit::singleline(key)
                             .hint_text("Header name")
-                            .desired_width(200.0)
+                            .desired_width(200.0),
                     );
                     let value_response = ui.add(
                         TextEdit::singleline(value)
                             .hint_text("Header value (supports {{variable}})")
-                            .desired_width(300.0)
+                            .desired_width(300.0),
                     );
                     if key_response.changed() || value_response.changed() {
                         headers_changed = true;
@@ -1017,7 +1049,7 @@ impl SendApp {
                     }
                 });
             }
-            
+
             // Remove headers
             if !to_remove.is_empty() {
                 for &i in to_remove.iter().rev() {
@@ -1025,7 +1057,7 @@ impl SendApp {
                 }
                 headers_changed = true;
             }
-            
+
             // Add new header button
             if ui.button("Add Header").clicked() {
                 self.current_request
@@ -1033,7 +1065,7 @@ impl SendApp {
                     .push((String::new(), String::new()));
                 headers_changed = true;
             }
-            
+
             if headers_changed {
                 self.save_current_request();
             }
@@ -1047,12 +1079,19 @@ impl SendApp {
                 .selectable_value(&mut self.current_request.body_type, BodyType::None, "none")
                 .changed()
             {
+                self.remove_content_type_header();
                 self.save_current_request();
             }
             if ui
-                .selectable_value(&mut self.current_request.body_type, BodyType::FormData, "form-data")
+                .selectable_value(
+                    &mut self.current_request.body_type,
+                    BodyType::FormData,
+                    "form-data",
+                )
                 .changed()
             {
+                // Form data uses multipart/form-data, but this is set automatically by reqwest
+                self.remove_content_type_header();
                 self.save_current_request();
             }
             if ui
@@ -1063,12 +1102,16 @@ impl SendApp {
                 )
                 .changed()
             {
+                self.set_content_type_header("application/x-www-form-urlencoded");
                 self.save_current_request();
             }
             if ui
                 .selectable_value(&mut self.current_request.body_type, BodyType::Raw, "raw")
                 .changed()
             {
+                // Set Content-Type based on current raw body type
+                let content_type = self.raw_body_type.get_content_type();
+                self.set_content_type_header(content_type);
                 self.save_current_request();
             }
         });
@@ -1077,14 +1120,34 @@ impl SendApp {
         if self.current_request.body_type == BodyType::Raw {
             ui.horizontal(|ui| {
                 ui.label("  "); // Indent for sub-tabs
-                ui.selectable_value(&mut self.raw_body_type, RawBodyType::Text, "Text");
-                ui.selectable_value(&mut self.raw_body_type, RawBodyType::JavaScript, "JavaScript");
-                ui.selectable_value(&mut self.raw_body_type, RawBodyType::JSON, "JSON");
-                ui.selectable_value(&mut self.raw_body_type, RawBodyType::HTML, "HTML");
-                ui.selectable_value(&mut self.raw_body_type, RawBodyType::XML, "XML");
+                
+                let mut raw_type_changed = false;
+                
+                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::Text, "Text").changed() {
+                    raw_type_changed = true;
+                }
+                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::JavaScript, "JavaScript").changed() {
+                    raw_type_changed = true;
+                }
+                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::JSON, "JSON").changed() {
+                    raw_type_changed = true;
+                }
+                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::HTML, "HTML").changed() {
+                    raw_type_changed = true;
+                }
+                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::XML, "XML").changed() {
+                    raw_type_changed = true;
+                }
+                
+                if raw_type_changed {
+                    // Update Content-Type header when raw body type changes
+                    let content_type = self.raw_body_type.get_content_type();
+                    self.set_content_type_header(content_type);
+                    self.save_current_request();
+                }
             });
         }
-        
+
         ui.separator();
 
         // Body content based on type
