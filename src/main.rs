@@ -85,7 +85,17 @@ struct AppStorage {
     environments: Vec<Environment>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppCache {
+    current_workspace: usize,
+    workspaces: Vec<Workspace>,
+    selected_sidebar_item: Option<SidebarItem>,
+    request_tab: RequestTab,
+    response_tab: ResponseTab,
+    raw_body_type: RawBodyType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Workspace {
     name: String,
     file_path: Option<std::path::PathBuf>,
@@ -127,27 +137,27 @@ struct SendApp {
     new_folder_name: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum ResponseTab {
     Body,
     Headers,
     Cookies,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum SidebarItem {
     Collections,
     Environment,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum RequestTab {
     Params,
     Headers,
     Body,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum RawBodyType {
     Text,
     JavaScript,
@@ -181,44 +191,99 @@ impl Default for SendApp {
             selected_environment: Some(0),
         };
 
-        Self {
-            workspaces: vec![default_workspace],
-            current_workspace: 0,
-            current_request: HttpRequest {
-                id: Uuid::new_v4().to_string(),
-                name: "New Request".to_string(),
-                method: "GET".to_string(),
-                url: "https://httpbin.org/get".to_string(),
-                headers: vec![],
-                body: String::new(),
-                body_type: BodyType::None,
-                form_data: vec![],
-                url_encoded_data: vec![],
-                query_params: vec![],
-            },
-            current_response: None,
-            is_loading: false,
-            selected_sidebar_item: None,
-            request_tab: RequestTab::Params,
-            raw_body_type: RawBodyType::JSON,
-            response_tab: ResponseTab::Body,
-            runtime: Runtime::new().unwrap(),
-            response_receiver: None,
-            new_collection_dialog: false,
-            new_collection_name: String::new(),
-            new_request_dialog: false,
-            new_request_name: String::new(),
-            new_workspace_dialog: false,
-            new_workspace_name: String::new(),
-            new_environment_dialog: false,
-            new_environment_name: String::new(),
-            new_folder_dialog: false,
-            new_folder_name: String::new(),
+        // Try to load from cache first
+        if let Some(cache) = Self::load_cache() {
+            let workspaces = if cache.workspaces.is_empty() {
+                vec![default_workspace]
+            } else {
+                cache.workspaces
+            };
+
+            let current_workspace = if cache.current_workspace < workspaces.len() {
+                cache.current_workspace
+            } else {
+                0
+            };
+
+            Self {
+                workspaces,
+                current_workspace,
+                current_request: HttpRequest {
+                    id: Uuid::new_v4().to_string(),
+                    name: "New Request".to_string(),
+                    method: "GET".to_string(),
+                    url: "https://httpbin.org/get".to_string(),
+                    headers: vec![],
+                    body: String::new(),
+                    body_type: BodyType::None,
+                    form_data: vec![],
+                    url_encoded_data: vec![],
+                    query_params: vec![],
+                },
+                current_response: None,
+                is_loading: false,
+                selected_sidebar_item: cache.selected_sidebar_item,
+                request_tab: cache.request_tab,
+                raw_body_type: cache.raw_body_type,
+                response_tab: cache.response_tab,
+                runtime: Runtime::new().unwrap(),
+                response_receiver: None,
+                new_collection_dialog: false,
+                new_collection_name: String::new(),
+                new_request_dialog: false,
+                new_request_name: String::new(),
+                new_workspace_dialog: false,
+                new_workspace_name: String::new(),
+                new_environment_dialog: false,
+                new_environment_name: String::new(),
+                new_folder_dialog: false,
+                new_folder_name: String::new(),
+            }
+        } else {
+            // Default configuration if no cache exists
+            Self {
+                workspaces: vec![default_workspace],
+                current_workspace: 0,
+                current_request: HttpRequest {
+                    id: Uuid::new_v4().to_string(),
+                    name: "New Request".to_string(),
+                    method: "GET".to_string(),
+                    url: "https://httpbin.org/get".to_string(),
+                    headers: vec![],
+                    body: String::new(),
+                    body_type: BodyType::None,
+                    form_data: vec![],
+                    url_encoded_data: vec![],
+                    query_params: vec![],
+                },
+                current_response: None,
+                is_loading: false,
+                selected_sidebar_item: None,
+                request_tab: RequestTab::Params,
+                raw_body_type: RawBodyType::JSON,
+                response_tab: ResponseTab::Body,
+                runtime: Runtime::new().unwrap(),
+                response_receiver: None,
+                new_collection_dialog: false,
+                new_collection_name: String::new(),
+                new_request_dialog: false,
+                new_request_name: String::new(),
+                new_workspace_dialog: false,
+                new_workspace_name: String::new(),
+                new_environment_dialog: false,
+                new_environment_name: String::new(),
+                new_folder_dialog: false,
+                new_folder_name: String::new(),
+            }
         }
     }
 }
 
 impl eframe::App for SendApp {
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.save_cache();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Check for response
         if let Some(receiver) = &self.response_receiver {
@@ -318,6 +383,7 @@ impl eframe::App for SendApp {
                         let selected = idx == self.current_workspace;
                         if ui.selectable_label(selected, &workspace.name).clicked() {
                             self.current_workspace = idx;
+                            self.save_cache();
                         }
                     }
                 });
@@ -349,6 +415,7 @@ impl eframe::App for SendApp {
                         } else {
                             self.selected_sidebar_item = Some(SidebarItem::Collections);
                         }
+                        self.save_cache();
                     }
 
                     ui.add_space(5.0);
@@ -370,6 +437,7 @@ impl eframe::App for SendApp {
                         } else {
                             self.selected_sidebar_item = Some(SidebarItem::Environment);
                         }
+                        self.save_cache();
                     }
                 });
             });
@@ -426,6 +494,47 @@ impl RawBodyType {
 }
 
 impl SendApp {
+    fn get_cache_dir() -> std::path::PathBuf {
+        let mut cache_dir = dirs::cache_dir().unwrap_or_else(|| std::env::current_dir().unwrap());
+        cache_dir.push("send");
+        cache_dir
+    }
+
+    fn get_cache_file_path() -> std::path::PathBuf {
+        let mut cache_path = Self::get_cache_dir();
+        cache_path.push("send.json");
+        cache_path
+    }
+
+    fn save_cache(&self) {
+        let cache = AppCache {
+            current_workspace: self.current_workspace,
+            workspaces: self.workspaces.clone(),
+            selected_sidebar_item: self.selected_sidebar_item.clone(),
+            request_tab: self.request_tab.clone(),
+            response_tab: self.response_tab.clone(),
+            raw_body_type: self.raw_body_type.clone(),
+        };
+
+        if let Ok(json) = serde_json::to_string_pretty(&cache) {
+            let cache_path = Self::get_cache_file_path();
+            if let Some(parent) = cache_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(cache_path, json);
+        }
+    }
+
+    fn load_cache() -> Option<AppCache> {
+        let cache_path = Self::get_cache_file_path();
+        if let Ok(content) = std::fs::read_to_string(cache_path) {
+            if let Ok(cache) = serde_json::from_str::<AppCache>(&content) {
+                return Some(cache);
+            }
+        }
+        None
+    }
+
     fn format_size(size: usize) -> String {
         if size < 1024 {
             format!("{} B", size)
@@ -504,22 +613,28 @@ impl SendApp {
 
     fn set_content_type_header(&mut self, content_type: &str) {
         // Find existing Content-Type header (case-insensitive)
-        let content_type_index = self.current_request.headers
+        let content_type_index = self
+            .current_request
+            .headers
             .iter()
             .position(|(key, _)| key.to_lowercase() == "content-type");
-        
+
         if let Some(index) = content_type_index {
             // Update existing Content-Type header
             self.current_request.headers[index].1 = content_type.to_string();
         } else {
             // Add new Content-Type header
-            self.current_request.headers.push(("Content-Type".to_string(), content_type.to_string()));
+            self.current_request
+                .headers
+                .push(("Content-Type".to_string(), content_type.to_string()));
         }
     }
-    
+
     fn remove_content_type_header(&mut self) {
         // Remove Content-Type header when body type is None
-        self.current_request.headers.retain(|(key, _)| key.to_lowercase() != "content-type");
+        self.current_request
+            .headers
+            .retain(|(key, _)| key.to_lowercase() != "content-type");
     }
 
     fn auto_save_workspace(&self) {
@@ -606,6 +721,7 @@ impl SendApp {
 
                     self.workspaces.push(new_workspace);
                     self.current_workspace = self.workspaces.len() - 1;
+                    self.save_cache();
                 }
             }
         }
@@ -996,9 +1112,24 @@ impl SendApp {
 
         // Request tabs (Postman style)
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.request_tab, RequestTab::Params, "Params");
-            ui.selectable_value(&mut self.request_tab, RequestTab::Headers, "Headers");
-            ui.selectable_value(&mut self.request_tab, RequestTab::Body, "Body");
+            if ui
+                .selectable_value(&mut self.request_tab, RequestTab::Params, "Params")
+                .changed()
+            {
+                self.save_cache();
+            }
+            if ui
+                .selectable_value(&mut self.request_tab, RequestTab::Headers, "Headers")
+                .changed()
+            {
+                self.save_cache();
+            }
+            if ui
+                .selectable_value(&mut self.request_tab, RequestTab::Body, "Body")
+                .changed()
+            {
+                self.save_cache();
+            }
         });
         ui.separator();
 
@@ -1120,30 +1251,50 @@ impl SendApp {
         if self.current_request.body_type == BodyType::Raw {
             ui.horizontal(|ui| {
                 ui.label("  "); // Indent for sub-tabs
-                
+
                 let mut raw_type_changed = false;
-                
-                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::Text, "Text").changed() {
+
+                if ui
+                    .selectable_value(&mut self.raw_body_type, RawBodyType::Text, "Text")
+                    .changed()
+                {
                     raw_type_changed = true;
                 }
-                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::JavaScript, "JavaScript").changed() {
+                if ui
+                    .selectable_value(
+                        &mut self.raw_body_type,
+                        RawBodyType::JavaScript,
+                        "JavaScript",
+                    )
+                    .changed()
+                {
                     raw_type_changed = true;
                 }
-                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::JSON, "JSON").changed() {
+                if ui
+                    .selectable_value(&mut self.raw_body_type, RawBodyType::JSON, "JSON")
+                    .changed()
+                {
                     raw_type_changed = true;
                 }
-                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::HTML, "HTML").changed() {
+                if ui
+                    .selectable_value(&mut self.raw_body_type, RawBodyType::HTML, "HTML")
+                    .changed()
+                {
                     raw_type_changed = true;
                 }
-                if ui.selectable_value(&mut self.raw_body_type, RawBodyType::XML, "XML").changed() {
+                if ui
+                    .selectable_value(&mut self.raw_body_type, RawBodyType::XML, "XML")
+                    .changed()
+                {
                     raw_type_changed = true;
                 }
-                
+
                 if raw_type_changed {
                     // Update Content-Type header when raw body type changes
                     let content_type = self.raw_body_type.get_content_type();
                     self.set_content_type_header(content_type);
                     self.save_current_request();
+                    self.save_cache();
                 }
             });
         }
@@ -1465,6 +1616,33 @@ impl SendApp {
             }
         });
         ui.separator();
+
+        // Response tabs first to avoid borrowing issues
+        let mut response_tab_changed = false;
+        if self.current_response.is_some() {
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_value(&mut self.response_tab, ResponseTab::Body, "Body")
+                    .changed()
+                {
+                    response_tab_changed = true;
+                }
+                if ui
+                    .selectable_value(&mut self.response_tab, ResponseTab::Headers, "Headers")
+                    .changed()
+                {
+                    response_tab_changed = true;
+                }
+                if ui
+                    .selectable_value(&mut self.response_tab, ResponseTab::Cookies, "Cookies")
+                    .changed()
+                {
+                    response_tab_changed = true;
+                }
+            });
+            ui.separator();
+        }
+
         if let Some(response) = &self.current_response {
             // Status and time
             ui.horizontal(|ui| {
@@ -1494,18 +1672,13 @@ impl SendApp {
                 ));
             });
             ui.separator();
-            // Response tabs
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.response_tab, ResponseTab::Body, "Body");
-                ui.selectable_value(&mut self.response_tab, ResponseTab::Headers, "Headers");
-                ui.selectable_value(&mut self.response_tab, ResponseTab::Cookies, "Cookies");
-            });
-            ui.separator();
+
             // Response content
             ScrollArea::vertical().show(ui, |ui| match self.response_tab {
                 ResponseTab::Body => {
+                    let mut body_text = response.body.clone();
                     ui.add(
-                        TextEdit::multiline(&mut response.body.clone())
+                        TextEdit::multiline(&mut body_text)
                             .desired_rows(15)
                             .desired_width(ui.available_width())
                             .interactive(false),
@@ -1527,6 +1700,10 @@ impl SendApp {
             ui.centered_and_justified(|ui| {
                 ui.label("No response yet. Send a request to see the response here.");
             });
+        }
+
+        if response_tab_changed {
+            self.save_cache();
         }
     }
 
@@ -1652,6 +1829,7 @@ impl SendApp {
                                 self.current_workspace = self.workspaces.len() - 1;
                                 self.new_workspace_name.clear();
                                 self.new_workspace_dialog = false;
+                                self.save_cache();
                             }
                         }
                         if ui.button("Cancel").clicked() {
